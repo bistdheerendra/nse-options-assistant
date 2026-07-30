@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0b0e11;
+  --foreground: #ffffff;
+  --binance-bg: #0b0e11;
+  --binance-surface: #181a20;
+  --binance-elevated: #1e2329;
+  --binance-gold: #f0b90b;
+  --binance-bull: #0ecb81;
+  --binance-bear: #f6465d;
+  --binance-muted: #848e9c;
+  --binance-text: #ffffff;
+  --binance-border: #2b3139;
+}
+
+@theme inline {
+  --color-background: var(--binance-bg);
+  --color-foreground: var(--binance-text);
+  --color-binance-bg: var(--binance-bg);
+  --color-binance-surface: var(--binance-surface);
+  --color-binance-elevated: var(--binance-elevated);
+  --color-binance-gold: var(--binance-gold);
+  --color-binance-bull: var(--binance-bull);
+  --color-binance-bear: var(--binance-bear);
+  --color-binance-muted: var(--binance-muted);
+  --color-binance-text: var(--binance-text);
+  --color-binance-border: var(--binance-border);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--binance-bg);
+  color: var(--binance-text);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  border-color: var(--binance-border);
+}

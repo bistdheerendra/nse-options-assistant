@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OptionType {
+  CE
+  PE
+}
+
+enum TradeAction {
+  BUY
+  SELL
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+  EXPIRED
+}
+
+enum TradingMode {
+  SCALP
+  SWING
+}
+
+enum DirectionalVerdict {
+  BULLISH
+  BEARISH
+  NEUTRAL
+}
+
+/// Point-in-time synthesis result + full feature snapshot (additive schema)
+model TradeIdea {
+  id                 String             @id @default(cuid())
+  underlying         String
+  mode               TradingMode
+  directionalVerdict DirectionalVerdict
+  structureAction    String
+  structureSide      String
+  isSellWrite        Boolean
+  reasoning          String
+  confidenceLabel    String
+  /// Full lane rawIndicators + scores + IV regime at decision time
+  featureSnapshot    Json
+  createdAt          DateTime           @default(now())
+
+  @@index([underlying, createdAt])
+  @@index([structureAction, createdAt])
+}
+
+model PaperOptionsAccount {
+  id            String            @id @default(cuid())
+  name          String            @default("Default Paper Account")
+  cashBalance   Float
+  startingCash  Float
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  positions     OptionsPosition[]
+}
+
+model OptionsPosition {
+  id            String              @id @default(cuid())
+  accountId     String
+  account       PaperOptionsAccount @relation(fields: [accountId], references: [id])
+  underlying    String
+  strike        Float
+  optionType    OptionType
+  expiry        DateTime
+  action        TradeAction
+  lotSize       Int
+  lots          Int
+  entryPremium  Float
+  status        PositionStatus      @default(OPEN)
+  exitPremium   Float?
+  realizedPnl   Float?
+  mode          TradingMode
+  symbolToken   String?
+  tradingSymbol String?
+  openedAt      DateTime            @default(now())
+  closedAt      DateTime?
+  /// Optional snapshot of chain/liquidity at entry
+  entrySnapshot Json?
+
+  @@index([accountId, status])
+  @@index([expiry, status])
+}
+
+/// Closed-idea outcomes for time-ordered track record
+model BacktestOutcome {
+  id              String   @id @default(cuid())
+  tradeIdeaId     String?
+  underlying      String
+  mode            TradingMode
+  structureBranch String
+  laneScores      Json
+  realizedPnl     Float
+  won             Boolean
+  decidedAt       DateTime
+  resolvedAt      DateTime @default(now())
+
+  @@index([structureBranch, decidedAt])
+  @@index([decidedAt])
+}

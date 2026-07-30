@@ -1,0 +1,82 @@
+# NSE Options Trading Assistant — Project Rules
+
+## 1. Project Summary
+
+Build a Binance-styled web assistant for NSE index options (NIFTY, BANKNIFTY, SENSEX) that:
+- Pulls live market data via Angel One SmartAPI
+- Runs independent analysis "lanes" (Technical, Options Flow, Sentiment, Macro)
+- Synthesizes lane scores into directional + IV-aware structure verdicts (Buy CE/PE vs Sell/write)
+- Supports Scalp vs Swing mode (real behavior change, not a label)
+- Provides paper trading with correct options P&L math (buy capped, sell uncapped/large)
+- Tracks backtest/track-record with time-ordered validation only
+
+This is analysis + paper trading. Real-money order placement / automation is out of scope.
+
+## 2. Locked Tech Stack
+
+| Layer | Choice |
+|-------|--------|
+| Framework | Next.js 15+ App Router, TypeScript strict |
+| UI | React 19, Tailwind, Framer Motion, Lucide |
+| Charts | lightweight-charts |
+| Theme | Binance-style dark + gold tokens (see theme.ts) |
+| ORM / DB | Prisma → Postgres (Supabase) |
+| Cache / jobs | Upstash Redis |
+| Market data | Angel One SmartAPI (TOTP login) |
+
+Do not introduce alternative brokers, chart libs, or ORMs without updating this contract and docs/PROJECT.md.
+
+## 3. Documentation Rule
+
+- `docs/PROJECT.md` is the living architecture doc. Update "Shipped vs Not Yet" and "External Data Sources" whenever integrations land.
+- Every external API must be listed with: purpose, free/paid, rate limits, fallback behavior.
+- Prefer reading live vendor docs over training memory before coding broker integrations.
+
+## 4. Safety Guardrails
+
+1. **Paper only for orders.** Never call Angel One placeOrder / modifyOrder / cancelOrder unless the user explicitly asks and confirms. If about to place a real order, stop and ask.
+2. **Sell/write risk must never be understated.** Buy max-loss = premium paid. Sell CE loss is uncapped; Sell PE loss is large (bounded by strike × lot × lots). UI must show explicit warnings.
+3. **No false certainty.** Heuristic scores are rules-based until backtests prove edge. Label UI accordingly.
+4. **Formulas need comments.** Every EMA/RSI/PCR/Max Pain/P&L formula gets an inline comment showing the math.
+5. **Secrets only via env.** Never hardcode API keys, TOTP secrets, or DB URLs.
+
+## 5. Architecture Patterns
+
+### Lanes
+Each lane is an independently callable, independently testable module returning:
+```
+{ score: number /* -1..1 */, signals: string[], rawIndicators: Record<string, unknown> }
+```
+Do not collapse lanes into one monolithic decision function.
+
+### Additive schema
+Persist trade ideas and paper positions with full point-in-time feature snapshots. Migrations are additive — do not rewrite unrelated models.
+
+### Synthesis (IV-aware branching)
+| Direction | IV regime | Structure |
+|-----------|-----------|-----------|
+| Bullish | low / falling | Buy CE |
+| Bullish | high / rising | consider Sell PE |
+| Bearish | low / falling | Buy PE |
+| Bearish | high / rising | consider Sell CE |
+
+## 6. External Call Behavior
+
+Every Angel One (and other vendor) call must:
+- Retry with exponential backoff on transient failures
+- Throw a typed error on down/rate-limit so UI can degrade ("market data unavailable")
+- Use in-process throttling — never unthrottled parallel option-chain hammering
+
+## 7. Definition of Done (every stage)
+
+1. Code builds: `npm run build` succeeds; paste real output.
+2. docs/PROJECT.md updated (Shipped vs Not Yet + External Data Sources as relevant).
+3. For P&L stages: include a concrete worked example (buy + sell) in the response.
+4. No silent stubs pretending to be live data — stubs must be labeled.
+
+## 8. Theme Tokens
+
+Never hardcode Binance palette hex values in components. Always use tokens from `src/lib/theme.ts` / Tailwind theme colors:
+- background `#0B0E11`, surface `#181A20`, elevated `#1E2329`
+- gold `#F0B90B`, bull `#0ECB81`, bear `#F6465D`
+- muted text mid-gray, primary text white
