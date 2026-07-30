@@ -34,6 +34,10 @@ export type OptionContractQuote = {
   tradingsymbol: string;
   symboltoken: string;
   ltp: number;
+  /** Absolute premium change vs previous close. */
+  change?: number;
+  /** Percent premium change vs previous close. */
+  changePct?: number;
   bid?: number;
   ask?: number;
   volume?: number;
@@ -46,6 +50,10 @@ export type OptionContractQuote = {
 export type OptionChainResult = {
   underlying: Underlying;
   spot: number;
+  /** Absolute day change vs previous close (for spot marker UI). */
+  spotChange?: number;
+  /** Percent day change vs previous close. */
+  spotChangePct?: number;
   expiry: string;
   contracts: OptionContractQuote[];
   demo?: boolean;
@@ -60,7 +68,7 @@ export const UNDERLYING_META: Record<
     exchange: "NSE",
     tradingsymbol: "Nifty 50",
     symboltoken: "99926000",
-    lotSize: 75,
+    lotSize: 65,
     optionExchange: "NFO",
   },
   BANKNIFTY: {

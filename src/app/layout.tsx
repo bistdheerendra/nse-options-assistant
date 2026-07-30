@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { NavLinks } from "@/components/NavLinks";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
@@ -34,17 +35,7 @@ export default function RootLayout({
             <Link href="/" className="text-lg font-semibold tracking-tight text-binance-gold">
               NSE Options Assistant
             </Link>
-            <nav className="flex gap-4 text-sm text-binance-muted">
-              <Link href="/" className="hover:text-binance-text">
-                Analysis
-              </Link>
-              <Link href="/paper" className="hover:text-binance-text">
-                Paper
-              </Link>
-              <Link href="/backtest" className="hover:text-binance-text">
-                Track Record
-              </Link>
-            </nav>
+            <NavLinks />
           </div>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">{children}</main>

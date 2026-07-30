@@ -4,8 +4,14 @@ import { ModeToggle } from "@/components/ModeToggle";
 import { motion } from "framer-motion";
 import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
 import { useCallback, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 type Underlying = "NIFTY" | "BANKNIFTY" | "SENSEX";
+
+function parseUnderlying(raw: string | null): Underlying {
+  if (raw === "BANKNIFTY" || raw === "SENSEX" || raw === "NIFTY") return raw;
+  return "NIFTY";
+}
 
 type SynthesisPayload = {
   underlying: string;
@@ -34,7 +40,10 @@ type SynthesisPayload = {
 };
 
 export function AnalysisPanel() {
-  const [underlying, setUnderlying] = useState<Underlying>("NIFTY");
+  const searchParams = useSearchParams();
+  const [underlying, setUnderlying] = useState<Underlying>(() =>
+    parseUnderlying(searchParams.get("underlying")),
+  );
   const [mode, setMode] = useState<"SCALP" | "SWING">("SWING");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +90,7 @@ export function AnalysisPanel() {
           onChange={(e) => setUnderlying(e.target.value as Underlying)}
           className="rounded border border-binance-border bg-binance-elevated px-3 py-2 text-sm"
         >
-          <option value="NIFTY">NIFTY</option>
+          <option value="NIFTY">Nifty 50</option>
           <option value="BANKNIFTY">BANKNIFTY</option>
           <option value="SENSEX">SENSEX</option>
         </select>

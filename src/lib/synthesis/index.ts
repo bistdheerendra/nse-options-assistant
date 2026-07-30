@@ -105,21 +105,30 @@ export async function runSynthesis(params: {
   let tradeIdeaId: string | null = null;
   let persisted = false;
   if (params.persist !== false && hasDatabase() && prisma) {
-    const row = await prisma.tradeIdea.create({
-      data: {
-        underlying: params.underlying,
-        mode,
-        directionalVerdict: directional.verdict,
-        structureAction: structure.branch,
-        structureSide: structure.action,
-        isSellWrite: structure.isSellWrite,
-        reasoning: structure.reasoning,
-        confidenceLabel,
-        featureSnapshot: featureSnapshot as Prisma.InputJsonValue,
-      },
-    });
-    tradeIdeaId = row.id;
-    persisted = true;
+    try {
+      const row = await prisma.tradeIdea.create({
+        data: {
+          underlying: params.underlying,
+          mode,
+          directionalVerdict: directional.verdict,
+          structureAction: structure.branch,
+          structureSide: structure.action,
+          isSellWrite: structure.isSellWrite,
+          reasoning: structure.reasoning,
+          confidenceLabel,
+          featureSnapshot: featureSnapshot as Prisma.InputJsonValue,
+        },
+      });
+      tradeIdeaId = row.id;
+      persisted = true;
+    } catch (err) {
+      // DATABASE_URL may be set but unreachable (e.g. local Postgres down).
+      // Analysis still returns; UI already handles persisted === false.
+      console.warn(
+        "[synthesis] tradeIdea persist skipped — database unreachable:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   return {

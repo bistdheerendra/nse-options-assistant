@@ -6,6 +6,10 @@ import { getUnderlyingLtp } from "./quotes";
 import type { OptionChainResult, OptionContractQuote, Underlying } from "./types";
 import { UNDERLYING_META } from "./types";
 import { angelThrottle } from "./throttle";
+import {
+  getNseOptionChain,
+  isNseOptionChainUnderlying,
+} from "@/lib/marketdata/nseOptionChain";
 
 type ScripRow = {
   token: string;
@@ -142,13 +146,24 @@ async function quoteFull(
 
 /**
  * Full option chain for an underlying + expiry.
- * Angel One has no dedicated chain endpoint — we filter OpenAPIScripMaster
- * then enrich with market/v1/quote FULL (LTP, OI, IV when available).
+ * Prefers NSE India live OC for NIFTY/BANKNIFTY (LTP + OI + % change).
+ * Falls back to Angel One SmartAPI quote FULL, then labeled demo mocks.
  */
 export async function getOptionChain(
   underlying: Underlying,
   expiry?: string,
 ): Promise<OptionChainResult> {
+  if (isNseOptionChainUnderlying(underlying)) {
+    try {
+      return await getNseOptionChain(underlying, expiry);
+    } catch (err) {
+      console.warn(
+        "[optionChain] NSE live fetch failed, falling back:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   if (isDemoMarketDataMode()) {
     return mockOptionChain(underlying, expiry);
   }
@@ -207,6 +222,12 @@ export async function getOptionChain(
   return {
     underlying,
     spot: spotQuote.ltp,
+    spotChange:
+      spotQuote.close !== undefined ? spotQuote.ltp - spotQuote.close : undefined,
+    spotChangePct:
+      spotQuote.close && spotQuote.close !== 0
+        ? ((spotQuote.ltp - spotQuote.close) / spotQuote.close) * 100
+        : undefined,
     expiry: parseExpiryToIso(chosenExpiry),
     contracts,
   };

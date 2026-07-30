@@ -8,12 +8,18 @@ function seeded(n: number): number {
 
 /** Deterministic demo series so lanes/UI work without Angel One credentials. */
 export function mockCandles(
-  underlying: Underlying,
+  underlying: Underlying | "GIFTNIFTY",
   interval: CandleInterval,
   count = 220,
 ): OhlcvCandle[] {
   const base =
-    underlying === "NIFTY" ? 24500 : underlying === "BANKNIFTY" ? 52000 : 80500;
+    underlying === "NIFTY"
+      ? 24500
+      : underlying === "BANKNIFTY"
+        ? 52000
+        : underlying === "GIFTNIFTY"
+          ? 24426
+          : 80500;
   const stepMin =
     interval === "ONE_MINUTE"
       ? 1
@@ -51,8 +57,11 @@ export function mockCandles(
 
 export function mockLtp(underlying: Underlying) {
   const meta = UNDERLYING_META[underlying];
-  const candles = mockCandles(underlying, "FIVE_MINUTE", 5);
+  const candles = mockCandles(underlying, "FIVE_MINUTE", 40);
   const last = candles[candles.length - 1]!;
+  const first = candles[0]!;
+  // Previous close ≈ first open of the demo window (for day-change display).
+  const prevClose = first.open;
   return {
     exchange: meta.exchange,
     tradingsymbol: meta.tradingsymbol,
@@ -61,13 +70,36 @@ export function mockLtp(underlying: Underlying) {
     open: last.open,
     high: last.high,
     low: last.low,
-    close: last.close,
+    close: prevClose,
+    demo: true as const,
+  };
+}
+
+/** Gift Nifty is not on Angel One SmartAPI — always a labeled mock. */
+export function mockGiftNiftyLtp() {
+  const candles = mockCandles("GIFTNIFTY", "FIVE_MINUTE", 40);
+  const last = candles[candles.length - 1]!;
+  const prevClose = candles[0]!.open;
+  return {
+    exchange: "NSEIX",
+    tradingsymbol: "GIFT Nifty",
+    symboltoken: "",
+    ltp: last.close,
+    open: last.open,
+    high: last.high,
+    low: last.low,
+    close: prevClose,
     demo: true as const,
   };
 }
 
 export function mockOptionChain(underlying: Underlying, expiry?: string) {
-  const spot = mockLtp(underlying).ltp;
+  const quote = mockLtp(underlying);
+  const spot = quote.ltp;
+  const prev = quote.close ?? spot;
+  // change = LTP - prevClose; changePct = change / prevClose * 100
+  const spotChange = spot - prev;
+  const spotChangePct = prev !== 0 ? (spotChange / prev) * 100 : 0;
   const meta = UNDERLYING_META[underlying];
   const step = underlying === "NIFTY" ? 50 : underlying === "BANKNIFTY" ? 100 : 100;
   const atm = Math.round(spot / step) * step;
@@ -101,7 +133,15 @@ export function mockOptionChain(underlying: Underlying, expiry?: string) {
       });
     }
   }
-  return { underlying, spot, expiry: exp, contracts, demo: true as const };
+  return {
+    underlying,
+    spot,
+    spotChange,
+    spotChangePct,
+    expiry: exp,
+    contracts,
+    demo: true as const,
+  };
 }
 
 function nextThursdayIso(): string {

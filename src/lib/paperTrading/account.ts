@@ -47,7 +47,7 @@ const DATA_DIR = path.join(process.cwd(), ".data");
 const STORE_PATH = path.join(DATA_DIR, "paper-account.json");
 
 function startingCash(): number {
-  return Number(process.env.PAPER_STARTING_CASH ?? 1_000_000);
+  return Number(process.env.PAPER_STARTING_CASH ?? 100_000);
 }
 
 function newId(prefix: string): string {

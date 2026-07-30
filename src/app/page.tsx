@@ -1,5 +1,5 @@
-import { AnalysisPanel } from "@/components/AnalysisPanel";
+import { DashboardPanel } from "@/components/DashboardPanel";
 
 export default function HomePage() {
-  return <AnalysisPanel />;
+  return <DashboardPanel />;
 }

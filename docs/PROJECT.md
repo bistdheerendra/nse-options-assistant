@@ -86,10 +86,13 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
+- Dashboard (default `/`): index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). Gift Nifty is labeled demo — not in Angel One OpenAPI scrip master.
+- Paper option chain: live NSE India OC for NIFTY/BANKNIFTY (Call/Put LTP + OI + % change, ~20s refresh); Groww-style spot marker between strikes.
 
 ### Not Yet
 - Live Sentiment lane (news / FII-DII feeds)
 - Live Macro lane (India VIX / USDINR / SGX Nifty / crude)
+- Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses labeled mock)
 - TimescaleDB IV time-series store (IV trend currently from live + candle-derived proxy)
 - Upstash Redis pub/sub for scalp second-level polling
 - Real broker order placement (intentionally out of scope)
@@ -100,6 +103,9 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 |--------|----------|------|---------------------|----------|
 | Angel One SmartAPI | Auth (TOTP), LTP, historical OHLCV, market quote FULL (OI/IV), scrip master for option chain | Free tier (SmartAPI app) | Session valid until midnight; historical intervals have day-range caps (e.g. ONE_MINUTE ≈ 30 days); throttle client to ~3–5 req/s; retry/backoff on 5xx/429 | Typed `MarketDataUnavailableError`; demo mock mode if credentials missing |
 | OpenAPI Scrip Master JSON | Symbol tokens for NIFTY/BANKNIFTY/SENSEX options | Free public dump | Cache locally; refresh periodically | Cached file / demo strikes |
+| Gift Nifty (NSE IFSC) | Dashboard quote card | N/A via SmartAPI | Not present in OpenAPIScripMaster (no AMXIDX/NSEIX row) | Labeled Nifty 50 proxy on Dashboard |
+| Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN | Free unofficial | Soft rate limits; may 429 | NSE `allIndices` spot for Nifty/Bank Nifty; then labeled demo |
+| NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY | Free public | Cookie session + soft rate limits; SENSEX not on this API | Angel One quote FULL; then labeled demo mocks |
 | Upstash Redis | Optional cache; future scalp pub/sub | Free tier limits apply | Per-plan | No-op client when env missing |
 
 ## Build order (reference)

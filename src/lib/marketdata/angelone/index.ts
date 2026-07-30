@@ -4,4 +4,6 @@ export * from "./auth";
 export * from "./quotes";
 export * from "./candles";
 export * from "./optionChain";
-export { mockCandles, mockLtp, mockOptionChain } from "./mock";
+export * from "./dashboardIndices";
+export * from "./dashboardQuotes";
+export { mockCandles, mockLtp, mockGiftNiftyLtp, mockOptionChain } from "./mock";
