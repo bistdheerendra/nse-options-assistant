@@ -50,6 +50,15 @@ export async function POST(req: Request) {
       );
     }
 
+    const stopLoss =
+      body.stopLoss != null && Number.isFinite(Number(body.stopLoss))
+        ? Number(body.stopLoss)
+        : undefined;
+    const takeProfit =
+      body.takeProfit != null && Number.isFinite(Number(body.takeProfit))
+        ? Number(body.takeProfit)
+        : undefined;
+
     const account = await openPaperTrade({
       underlying: String(body.underlying),
       strike: Number(body.strike),
@@ -63,6 +72,8 @@ export async function POST(req: Request) {
       symbolToken: body.symbolToken,
       tradingSymbol: body.tradingSymbol,
       entrySnapshot: { risk },
+      stopLoss,
+      takeProfit,
     });
 
     return NextResponse.json({

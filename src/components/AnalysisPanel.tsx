@@ -163,6 +163,8 @@ export function AnalysisPanel() {
           tradingSymbol: c.tradingsymbol,
           acknowledgeSellRisk: ackSell,
           tradeIdeaId: data.tradeIdeaId,
+          // Premium SL hint from plan when buy; else server defaults (1:2 R on premium)
+          stopLoss: c.premiumStopHint ?? undefined,
         }),
       });
       const json = await res.json();

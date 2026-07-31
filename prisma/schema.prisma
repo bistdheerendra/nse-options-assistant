@@ -79,9 +79,15 @@ model OptionsPosition {
   lotSize       Int
   lots          Int
   entryPremium  Float
+  /// Premium stop (BUY: below entry; SELL: above entry)
+  stopLoss      Float?
+  /// Premium take-profit (BUY: above entry; SELL: below entry)
+  takeProfit    Float?
   status        PositionStatus      @default(OPEN)
   exitPremium   Float?
   realizedPnl   Float?
+  /// MANUAL | TP | SL | EXPIRED
+  closeReason   String?
   mode          TradingMode
   symbolToken   String?
   tradingSymbol String?

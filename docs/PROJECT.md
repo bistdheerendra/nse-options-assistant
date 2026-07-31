@@ -64,7 +64,9 @@ Sell/write recommendations must surface uncapped / large-loss risk explicitly.
 ### 4.2 OptionsPosition
 - `underlying`, `strike`, `optionType` (CE/PE), `expiry`, `action` (BUY/SELL)
 - `lotSize`, `lots`, `entryPremium`, `status` (OPEN/CLOSED/EXPIRED)
-- `exitPremium`, `realizedPnl`, `mode` (SCALP/SWING), timestamps
+- Premium `stopLoss` / `takeProfit` (defaults: BUY SL=0.6·entry TP=1.8·entry; SELL mirrored 1.4 / 0.2). Persisted on position + `entrySnapshot` (run `npm run db:push` after pull for dedicated columns).
+- `closeReason` (`MANUAL` | `TP` | `SL` | `EXPIRED`) — TP/SL auto-close moves row to Closed
+- `exitPremium`, `realizedPnl`, `mode` (SCALP/SWING), `openedAt` / `closedAt` (UI shows live duration)
 
 ### P&L
 - Buy: `(exit - entry) * lotSize * lots` — max loss capped at premium paid
@@ -124,7 +126,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Stage 3.1: Synthesized verdict card — ATR trade plan (Entry/SL/TP1/TP2 + R:R), regime (TRENDING/CHOPPY/VOLATILE), lane alignment, experimental edge from track-record (no ML), Mark as taken → paper
 - Stage 3.2: Analysis **50/50** layout — verdict left, live candlestick chart right (`AnalysisLiveChart` / `lightweight-charts`). Candles from `/api/analysis/candles` (prefer Yahoo timed OHLC so series matches live spot; Angel when available / non-demo). Forming bar patched from dashboard SSE LTP only when within **0.5%** of last close (avoids mock↔live crash candle). Dashed Entry / SL / TP1 / TP2 price lines after synthesis. UI default mode **Scalp**.
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
-- Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror)
+- Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror); open positions show duration + premium TP/SL; auto-close on TP/SL hit → Closed table with status reason
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
 - Stage 6.1: Backtest re-validation after 4-lane synthesis — `synthesisVersion` cohort split (legacy 2-lane-effective vs post-4-lane); edge badges use post-4-lane only with insufficient-sample gating; per-lane lean includes Macro + Sentiment
 - Dashboard (default `/`): Binance-style paper portfolio P&L header (`PortfolioPnlCard` — est. total value, today’s PnL, gold equity sparkline, hide-balance toggle, client retry) above index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). **Live path:** backend `liveQuoteHub` — fast public spot loop ~350ms (NSE `allIndices` + Gift, no Yahoo) pushed via SSE `/api/dashboard/stream`; full candle snapshot ~30s. Browser `EventSource` (check Network → EventStream, not Fetch/XHR). With `MARKETDATA_DEMO_MODE=true` / missing Angel keys, LTP is public-feed delayed (not broker ticks). Pulsing **LIVE** badge + price flash when LTP changes.

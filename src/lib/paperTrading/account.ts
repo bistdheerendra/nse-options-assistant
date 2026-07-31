@@ -2,8 +2,11 @@ import { promises as fs } from "fs";
 import path from "path";
 import { hasDatabase, prisma } from "@/lib/prisma";
 import {
+  defaultPremiumTpSl,
+  premiumExitHit,
   settlePnl,
   unrealizedPnl,
+  type CloseReason,
   type OptionSide,
   type TradeAction,
 } from "./pnl";
@@ -20,9 +23,12 @@ export type PaperPosition = {
   lotSize: number;
   lots: number;
   entryPremium: number;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
   status: "OPEN" | "CLOSED" | "EXPIRED";
   exitPremium?: number | null;
   realizedPnl?: number | null;
+  closeReason?: CloseReason | string | null;
   mode: "SCALP" | "SWING";
   symbolToken?: string | null;
   tradingSymbol?: string | null;
@@ -82,37 +88,65 @@ async function writeFileStore(store: StoreFile): Promise<void> {
   await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
 }
 
-function mapDbAccount(
-  acc: {
-    id: string;
-    name: string;
-    cashBalance: number;
-    startingCash: number;
-    createdAt: Date;
-    updatedAt: Date;
-    positions: Array<{
-      id: string;
-      accountId: string;
-      underlying: string;
-      strike: number;
-      optionType: OptionSide;
-      expiry: Date;
-      action: TradeAction;
-      lotSize: number;
-      lots: number;
-      entryPremium: number;
-      status: "OPEN" | "CLOSED" | "EXPIRED";
-      exitPremium: number | null;
-      realizedPnl: number | null;
-      mode: "SCALP" | "SWING";
-      symbolToken: string | null;
-      tradingSymbol: string | null;
-      openedAt: Date;
-      closedAt: Date | null;
-      entrySnapshot: unknown;
-    }>;
-  },
-): PaperAccount {
+type DbPositionRow = {
+  id: string;
+  accountId: string;
+  underlying: string;
+  strike: number;
+  optionType: OptionSide;
+  expiry: Date;
+  action: TradeAction;
+  lotSize: number;
+  lots: number;
+  entryPremium: number;
+  status: "OPEN" | "CLOSED" | "EXPIRED";
+  exitPremium: number | null;
+  realizedPnl: number | null;
+  mode: "SCALP" | "SWING";
+  symbolToken: string | null;
+  tradingSymbol: string | null;
+  openedAt: Date;
+  closedAt: Date | null;
+  entrySnapshot: unknown;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+  closeReason?: string | null;
+};
+
+function snapshotMeta(snap: unknown): {
+  stopLoss?: number;
+  takeProfit?: number;
+  closeReason?: string;
+} {
+  if (!snap || typeof snap !== "object") return {};
+  const s = snap as Record<string, unknown>;
+  return {
+    stopLoss: typeof s.stopLoss === "number" ? s.stopLoss : undefined,
+    takeProfit: typeof s.takeProfit === "number" ? s.takeProfit : undefined,
+    closeReason: typeof s.closeReason === "string" ? s.closeReason : undefined,
+  };
+}
+
+function mergeSnapshot(
+  base: unknown,
+  extra: Record<string, unknown>,
+): Prisma.InputJsonValue {
+  const prev =
+    base && typeof base === "object" && !Array.isArray(base)
+      ? (base as Record<string, unknown>)
+      : {};
+  return { ...prev, ...extra } as Prisma.InputJsonValue;
+}
+
+function mapDbAccount(acc: {
+  id: string;
+  name: string;
+  cashBalance: number;
+  startingCash: number;
+  createdAt: Date;
+  updatedAt: Date;
+  positions: DbPositionRow[];
+}): PaperAccount {
   return {
     id: acc.id,
     name: acc.name,
@@ -120,27 +154,33 @@ function mapDbAccount(
     startingCash: acc.startingCash,
     createdAt: acc.createdAt.toISOString(),
     updatedAt: acc.updatedAt.toISOString(),
-    positions: acc.positions.map((p) => ({
-      id: p.id,
-      accountId: p.accountId,
-      underlying: p.underlying,
-      strike: p.strike,
-      optionType: p.optionType,
-      expiry: p.expiry.toISOString().slice(0, 10),
-      action: p.action,
-      lotSize: p.lotSize,
-      lots: p.lots,
-      entryPremium: p.entryPremium,
-      status: p.status,
-      exitPremium: p.exitPremium,
-      realizedPnl: p.realizedPnl,
-      mode: p.mode,
-      symbolToken: p.symbolToken,
-      tradingSymbol: p.tradingSymbol,
-      openedAt: p.openedAt.toISOString(),
-      closedAt: p.closedAt?.toISOString() ?? null,
-      entrySnapshot: p.entrySnapshot,
-    })),
+    positions: acc.positions.map((p) => {
+      const meta = snapshotMeta(p.entrySnapshot);
+      return {
+        id: p.id,
+        accountId: p.accountId,
+        underlying: p.underlying,
+        strike: p.strike,
+        optionType: p.optionType,
+        expiry: p.expiry.toISOString().slice(0, 10),
+        action: p.action,
+        lotSize: p.lotSize,
+        lots: p.lots,
+        entryPremium: p.entryPremium,
+        stopLoss: p.stopLoss ?? meta.stopLoss ?? null,
+        takeProfit: p.takeProfit ?? meta.takeProfit ?? null,
+        status: p.status,
+        exitPremium: p.exitPremium,
+        realizedPnl: p.realizedPnl,
+        closeReason: p.closeReason ?? meta.closeReason ?? null,
+        mode: p.mode,
+        symbolToken: p.symbolToken,
+        tradingSymbol: p.tradingSymbol,
+        openedAt: p.openedAt.toISOString(),
+        closedAt: p.closedAt?.toISOString() ?? null,
+        entrySnapshot: p.entrySnapshot,
+      };
+    }),
   };
 }
 
@@ -179,7 +219,7 @@ export async function getOrCreateAccount(): Promise<PaperAccount> {
             include: { positions: true },
           });
         }
-        const mapped = mapDbAccount(acc);
+        const mapped = mapDbAccount(acc as Parameters<typeof mapDbAccount>[0]);
         memoryCache = mapped;
         void mirrorToFile(mapped);
         return mapped;
@@ -233,18 +273,34 @@ export async function openPaperTrade(input: {
   symbolToken?: string;
   tradingSymbol?: string;
   entrySnapshot?: unknown;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
 }): Promise<PaperAccount> {
   // Premium cash impact: BUY debits premium*mult; SELL credits it
   const notional = input.entryPremium * input.lotSize * input.lots;
   const cashDelta = input.action === "BUY" ? -notional : notional;
+  const defaults = defaultPremiumTpSl(input.action, input.entryPremium);
+  const stopLoss =
+    input.stopLoss != null && Number.isFinite(input.stopLoss)
+      ? Number(input.stopLoss)
+      : defaults.stopLoss;
+  const takeProfit =
+    input.takeProfit != null && Number.isFinite(input.takeProfit)
+      ? Number(input.takeProfit)
+      : defaults.takeProfit;
 
   if (hasDatabase() && prisma) {
     const acc = await getOrCreateAccount();
+    const entrySnapshot = mergeSnapshot(input.entrySnapshot, {
+      stopLoss,
+      takeProfit,
+    });
     await prisma.$transaction(async (tx) => {
       await tx.paperOptionsAccount.update({
         where: { id: acc.id },
         data: { cashBalance: acc.cashBalance + cashDelta },
       });
+      // TP/SL live in entrySnapshot until prisma generate + db push land dedicated columns
       await tx.optionsPosition.create({
         data: {
           accountId: acc.id,
@@ -259,7 +315,7 @@ export async function openPaperTrade(input: {
           mode: input.mode,
           symbolToken: input.symbolToken,
           tradingSymbol: input.tradingSymbol,
-          entrySnapshot: input.entrySnapshot as Prisma.InputJsonValue | undefined,
+          entrySnapshot,
         },
       });
     });
@@ -281,12 +337,14 @@ export async function openPaperTrade(input: {
     lotSize: input.lotSize,
     lots: input.lots,
     entryPremium: input.entryPremium,
+    stopLoss,
+    takeProfit,
     status: "OPEN",
     mode: input.mode,
     symbolToken: input.symbolToken,
     tradingSymbol: input.tradingSymbol,
     openedAt: new Date().toISOString(),
-    entrySnapshot: input.entrySnapshot,
+    entrySnapshot: mergeSnapshot(input.entrySnapshot, { stopLoss, takeProfit }),
   };
   store.account.cashBalance += cashDelta;
   store.account.positions.push(pos);
@@ -298,6 +356,7 @@ export async function openPaperTrade(input: {
 export async function closePaperTrade(params: {
   positionId: string;
   exitPremium: number;
+  closeReason?: CloseReason;
 }): Promise<PaperAccount> {
   const account = await getOrCreateAccount();
   const pos = account.positions.find((p) => p.id === params.positionId);
@@ -314,6 +373,8 @@ export async function closePaperTrade(params: {
     pos.action === "BUY"
       ? params.exitPremium * pos.lotSize * pos.lots
       : -params.exitPremium * pos.lotSize * pos.lots;
+  const closeReason: CloseReason = params.closeReason ?? "MANUAL";
+  const entrySnapshot = mergeSnapshot(pos.entrySnapshot, { closeReason });
 
   if (hasDatabase() && prisma) {
     await prisma.$transaction(async (tx) => {
@@ -324,6 +385,7 @@ export async function closePaperTrade(params: {
           exitPremium: params.exitPremium,
           realizedPnl: realized,
           closedAt: new Date(),
+          entrySnapshot,
         },
       });
       await tx.paperOptionsAccount.update({
@@ -339,11 +401,54 @@ export async function closePaperTrade(params: {
   p.status = "CLOSED";
   p.exitPremium = params.exitPremium;
   p.realizedPnl = realized;
+  p.closeReason = closeReason;
+  p.entrySnapshot = entrySnapshot;
   p.closedAt = new Date().toISOString();
   store.account.cashBalance += closeCash;
   store.account.updatedAt = new Date().toISOString();
   await writeFileStore(store);
   return store.account;
+}
+
+/**
+ * Auto-close OPEN positions whose live mark hit premium TP or SL.
+ * marks: tradingSymbol → LTP (fallback key: underlying-strike-optionType)
+ */
+export async function closePositionsOnTpSl(
+  marks: Record<string, number>,
+): Promise<{ closed: Array<{ id: string; reason: "TP" | "SL"; exitPremium: number }> }> {
+  const account = await getOrCreateAccount();
+  const closed: Array<{ id: string; reason: "TP" | "SL"; exitPremium: number }> = [];
+
+  for (const pos of account.positions) {
+    if (pos.status !== "OPEN") continue;
+    const key =
+      pos.tradingSymbol ?? `${pos.underlying}-${pos.strike}-${pos.optionType}`;
+    const mark = marks[key];
+    if (mark == null || !Number.isFinite(mark)) continue;
+
+    const levels =
+      pos.stopLoss != null && pos.takeProfit != null
+        ? { stopLoss: pos.stopLoss, takeProfit: pos.takeProfit }
+        : defaultPremiumTpSl(pos.action, pos.entryPremium);
+
+    const hit = premiumExitHit({
+      action: pos.action,
+      markPremium: mark,
+      stopLoss: levels.stopLoss,
+      takeProfit: levels.takeProfit,
+    });
+    if (!hit) continue;
+
+    await closePaperTrade({
+      positionId: pos.id,
+      exitPremium: mark,
+      closeReason: hit,
+    });
+    closed.push({ id: pos.id, reason: hit, exitPremium: mark });
+  }
+
+  return { closed };
 }
 
 export async function settleExpiredPositions(spotByUnderlying: Record<string, number>): Promise<{
@@ -387,6 +492,9 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
             exitPremium,
             realizedPnl,
             closedAt: new Date(),
+            entrySnapshot: mergeSnapshot(pos.entrySnapshot, {
+              closeReason: "EXPIRED",
+            }),
           },
         });
         await tx.paperOptionsAccount.update({
@@ -401,6 +509,7 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
       p.status = "EXPIRED";
       p.exitPremium = exitPremium;
       p.realizedPnl = realizedPnl;
+      p.closeReason = "EXPIRED";
       p.closedAt = new Date().toISOString();
       store.account.cashBalance += closeCash;
       store.account.updatedAt = new Date().toISOString();

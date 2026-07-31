@@ -2,7 +2,11 @@
 
 import { ModeToggle } from "@/components/ModeToggle";
 import { SpotPriceMarker } from "@/components/SpotPriceMarker";
-import { unrealizedPnl } from "@/lib/paperTrading/pnl";
+import {
+  defaultPremiumTpSl,
+  premiumExitHit,
+  unrealizedPnl,
+} from "@/lib/paperTrading/pnl";
 import { theme } from "@/lib/theme";
 import { Loader2 } from "lucide-react";
 import {
@@ -31,26 +35,69 @@ type ChainContract = {
   expiry: string;
 };
 
+type PositionRow = {
+  id: string;
+  underlying: string;
+  strike: number;
+  optionType: string;
+  expiry: string;
+  action: string;
+  lotSize: number;
+  lots: number;
+  entryPremium: number;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+  status: string;
+  exitPremium?: number | null;
+  realizedPnl?: number | null;
+  closeReason?: string | null;
+  mode: string;
+  tradingSymbol?: string | null;
+  openedAt?: string;
+  closedAt?: string | null;
+};
+
 type Account = {
   cashBalance: number;
   startingCash: number;
-  positions: Array<{
-    id: string;
-    underlying: string;
-    strike: number;
-    optionType: string;
-    expiry: string;
-    action: string;
-    lotSize: number;
-    lots: number;
-    entryPremium: number;
-    status: string;
-    exitPremium?: number | null;
-    realizedPnl?: number | null;
-    mode: string;
-    tradingSymbol?: string | null;
-  }>;
+  positions: PositionRow[];
 };
+
+/** Format elapsed open time: 45s · 12m 5s · 2h 15m · 1d 3h */
+function formatDuration(fromIso: string | undefined, toMs: number): string {
+  if (!fromIso) return "—";
+  const start = new Date(fromIso).getTime();
+  if (!Number.isFinite(start)) return "—";
+  const sec = Math.max(0, Math.floor((toMs - start) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 48) return `${h}h ${rm}m`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return `${d}d ${rh}h`;
+}
+
+function levelsFor(p: PositionRow): { stopLoss: number; takeProfit: number } {
+  if (p.stopLoss != null && p.takeProfit != null) {
+    return { stopLoss: p.stopLoss, takeProfit: p.takeProfit };
+  }
+  return defaultPremiumTpSl(
+    p.action === "SELL" ? "SELL" : "BUY",
+    p.entryPremium,
+  );
+}
+
+function closeReasonLabel(reason: string | null | undefined, status: string): string {
+  if (status === "EXPIRED" || reason === "EXPIRED") return "Expired";
+  if (reason === "TP") return "TP hit";
+  if (reason === "SL") return "SL hit";
+  if (reason === "MANUAL") return "Manual";
+  return status === "CLOSED" ? "Closed" : status;
+}
 
 function formatStrike(n: number) {
   return n.toLocaleString("en-IN");
@@ -161,6 +208,11 @@ function BuyOrderPanel({
   selected,
   lots,
   onLotsChange,
+  stopLoss,
+  takeProfit,
+  onStopLossChange,
+  onTakeProfitChange,
+  onResetLevels,
   pct,
   onPctChange,
   cashBalance,
@@ -174,6 +226,11 @@ function BuyOrderPanel({
   selected: ChainContract | null;
   lots: number;
   onLotsChange: (n: number) => void;
+  stopLoss: string;
+  takeProfit: string;
+  onStopLossChange: (v: string) => void;
+  onTakeProfitChange: (v: string) => void;
+  onResetLevels: () => void;
   pct: number;
   onPctChange: (n: number) => void;
   cashBalance: number;
@@ -184,6 +241,18 @@ function BuyOrderPanel({
   onSubmit: () => void;
   disabled: boolean;
 }) {
+  const entry = selected?.ltp ?? null;
+  const slNum = Number(stopLoss);
+  const tpNum = Number(takeProfit);
+  const levelsValid =
+    entry != null &&
+    Number.isFinite(slNum) &&
+    Number.isFinite(tpNum) &&
+    slNum > 0 &&
+    tpNum > 0 &&
+    slNum < entry &&
+    tpNum > entry;
+
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm font-semibold text-binance-bull">
@@ -210,6 +279,59 @@ function BuyOrderPanel({
           className="w-full bg-transparent text-right outline-none disabled:cursor-not-allowed"
         />
       </FieldRow>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex items-center gap-2 rounded border border-binance-border bg-binance-elevated px-3 py-2">
+          <span className="shrink-0 text-xs text-binance-bear">SL</span>
+          <input
+            type="number"
+            min={0}
+            step="0.05"
+            value={selected ? stopLoss : ""}
+            placeholder="—"
+            disabled={disabled}
+            onChange={(e) => onStopLossChange(e.target.value)}
+            className="min-w-0 w-full bg-transparent text-right text-sm tabular-nums text-binance-bear outline-none disabled:cursor-not-allowed"
+            title="Premium stop-loss (must be below entry for buys)"
+          />
+        </div>
+        <div className="flex items-center gap-2 rounded border border-binance-border bg-binance-elevated px-3 py-2">
+          <span className="shrink-0 text-xs text-binance-bull">TP</span>
+          <input
+            type="number"
+            min={0}
+            step="0.05"
+            value={selected ? takeProfit : ""}
+            placeholder="—"
+            disabled={disabled}
+            onChange={(e) => onTakeProfitChange(e.target.value)}
+            className="min-w-0 w-full bg-transparent text-right text-sm tabular-nums text-binance-bull outline-none disabled:cursor-not-allowed"
+            title="Premium take-profit (must be above entry for buys)"
+          />
+        </div>
+      </div>
+
+      {selected && (
+        <div className="flex items-center justify-between gap-2 text-[11px]">
+          <span
+            className={
+              levelsValid ? "text-binance-muted" : "text-binance-bear"
+            }
+          >
+            {levelsValid
+              ? "Premium levels · SL below entry · TP above"
+              : "SL must be < entry and TP > entry"}
+          </span>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={onResetLevels}
+            className="shrink-0 text-binance-gold hover:underline disabled:opacity-40"
+          >
+            Reset
+          </button>
+        </div>
+      )}
 
       <PctSlider
         value={selected ? pct : 0}
@@ -252,7 +374,7 @@ function BuyOrderPanel({
 
       <button
         type="button"
-        disabled={disabled || busy || !selected || lots < 1}
+        disabled={disabled || busy || !selected || lots < 1 || !levelsValid}
         onClick={onSubmit}
         className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded bg-binance-bull px-4 py-2.5 text-sm font-semibold text-binance-bg hover:brightness-110 disabled:opacity-40"
       >
@@ -284,15 +406,19 @@ export function PaperTradingPanel() {
   const [selected, setSelected] = useState<ChainContract | null>(null);
   const [buyLots, setBuyLots] = useState(1);
   const [buyPct, setBuyPct] = useState(0);
+  const [buyStopLoss, setBuyStopLoss] = useState("");
+  const [buyTakeProfit, setBuyTakeProfit] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [exitingId, setExitingId] = useState<string | null>(null);
   const [exitMsg, setExitMsg] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const chainScrollRef = useRef<HTMLDivElement>(null);
   const spotMarkerRef = useRef<HTMLTableRowElement>(null);
   /** Only auto-center spot once per underlying+expiry (not on 20s refresh). */
   const centeredForKeyRef = useRef<string | null>(null);
   const selectedKeyRef = useRef<string | null>(null);
+  const checkingExitsRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/paper");
@@ -315,13 +441,13 @@ export function PaperTradingPanel() {
     const key = selectedKeyRef.current;
     if (!key) {
       setSelected(null);
-      return;
+    } else {
+      const match = next.find(
+        (c) => c.tradingsymbol === key || c.symboltoken === key,
+      );
+      setSelected(match ?? null);
+      if (!match) selectedKeyRef.current = null;
     }
-    const match = next.find(
-      (c) => c.tradingsymbol === key || c.symboltoken === key,
-    );
-    setSelected(match ?? null);
-    if (!match) selectedKeyRef.current = null;
   }, [underlying]);
 
   useEffect(() => {
@@ -330,6 +456,8 @@ export function PaperTradingPanel() {
     setMsg(null);
     setBuyLots(1);
     setBuyPct(0);
+    setBuyStopLoss("");
+    setBuyTakeProfit("");
   }, [underlying]);
 
   useEffect(() => {
@@ -338,6 +466,69 @@ export function PaperTradingPanel() {
     const id = window.setInterval(() => void loadChain(), 20_000);
     return () => window.clearInterval(id);
   }, [refresh, loadChain]);
+
+  // Live duration ticker (1s)
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Auto-close open positions when live mark hits premium TP or SL
+  useEffect(() => {
+    const openRows = account?.positions.filter((p) => p.status === "OPEN") ?? [];
+    if (!openRows.length || !contracts.length || checkingExitsRef.current) return;
+
+    const marks: Record<string, number> = {};
+    let anyHit = false;
+    for (const p of openRows) {
+      const match = contracts.find(
+        (c) =>
+          c.strike === p.strike &&
+          c.optionType === p.optionType &&
+          (p.tradingSymbol
+            ? c.tradingsymbol === p.tradingSymbol
+            : p.underlying === underlying),
+      );
+      if (!match) continue;
+      const key =
+        p.tradingSymbol ?? `${p.underlying}-${p.strike}-${p.optionType}`;
+      marks[key] = match.ltp;
+      marks[`${p.underlying}-${p.strike}-${p.optionType}`] = match.ltp;
+      const levels = levelsFor(p);
+      const hit = premiumExitHit({
+        action: p.action === "SELL" ? "SELL" : "BUY",
+        markPremium: match.ltp,
+        stopLoss: levels.stopLoss,
+        takeProfit: levels.takeProfit,
+      });
+      if (hit) anyHit = true;
+    }
+    if (!anyHit) return;
+
+    checkingExitsRef.current = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/paper/close", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ marks }),
+        });
+        const json = await res.json();
+        if (!res.ok) return;
+        if (Array.isArray(json.closed) && json.closed.length > 0) {
+          setAccount(json.account);
+          setSummary(json.summary);
+          const parts = json.closed.map(
+            (c: { reason: string; exitPremium: number }) =>
+              `${c.reason} @ ₹${Number(c.exitPremium).toFixed(2)}`,
+          );
+          setExitMsg(`Auto-closed: ${parts.join(", ")}`);
+        }
+      } finally {
+        checkingExitsRef.current = false;
+      }
+    })();
+  }, [account, contracts, underlying]);
 
   const cashBalance = summary?.cashBalance ?? account?.cashBalance ?? 0;
 
@@ -356,12 +547,19 @@ export function PaperTradingPanel() {
     return `Max loss (buy) = premium paid = ₹${(selected.ltp * selected.lotSize * buyLots).toFixed(2)}`;
   }, [selected, buyLots]);
 
+  function applyDefaultLevels(ltp: number) {
+    const { stopLoss, takeProfit } = defaultPremiumTpSl("BUY", ltp);
+    setBuyStopLoss(stopLoss.toFixed(2));
+    setBuyTakeProfit(takeProfit.toFixed(2));
+  }
+
   function selectContract(c: ChainContract) {
     selectedKeyRef.current = c.tradingsymbol || c.symboltoken;
     setSelected(c);
     setMsg(null);
     setBuyLots(1);
     setBuyPct(0);
+    applyDefaultLevels(c.ltp);
   }
 
   function applyBuyPct(pct: number) {
@@ -372,6 +570,19 @@ export function PaperTradingPanel() {
 
   async function submitBuy() {
     if (!selected) return;
+    const stopLoss = Number(buyStopLoss);
+    const takeProfit = Number(buyTakeProfit);
+    if (
+      !Number.isFinite(stopLoss) ||
+      !Number.isFinite(takeProfit) ||
+      stopLoss <= 0 ||
+      takeProfit <= 0 ||
+      stopLoss >= selected.ltp ||
+      takeProfit <= selected.ltp
+    ) {
+      setMsg("Set valid premium SL (< entry) and TP (> entry) before buying.");
+      return;
+    }
     setBusy(true);
     setMsg(null);
     try {
@@ -390,6 +601,8 @@ export function PaperTradingPanel() {
           mode,
           symbolToken: selected.symboltoken,
           tradingSymbol: selected.tradingsymbol,
+          stopLoss,
+          takeProfit,
           acknowledgeSellRisk: false,
         }),
       });
@@ -397,7 +610,10 @@ export function PaperTradingPanel() {
       if (!res.ok) throw new Error(json.error ?? "Trade failed");
       setAccount(json.account);
       setSummary(json.summary);
-      setMsg(json.note ?? "Paper trade placed.");
+      setMsg(
+        json.note ??
+          `Paper trade placed · SL ₹${stopLoss.toFixed(2)} · TP ₹${takeProfit.toFixed(2)}`,
+      );
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -429,7 +645,11 @@ export function PaperTradingPanel() {
       const res = await fetch("/api/paper/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ positionId: p.id, exitPremium }),
+        body: JSON.stringify({
+          positionId: p.id,
+          exitPremium,
+          closeReason: "MANUAL",
+        }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Exit failed");
@@ -653,6 +873,13 @@ export function PaperTradingPanel() {
               setBuyLots(n);
               setBuyPct(0);
             }}
+            stopLoss={buyStopLoss}
+            takeProfit={buyTakeProfit}
+            onStopLossChange={setBuyStopLoss}
+            onTakeProfitChange={setBuyTakeProfit}
+            onResetLevels={() => {
+              if (selected) applyDefaultLevels(selected.ltp);
+            }}
             pct={buyPct}
             onPctChange={applyBuyPct}
             cashBalance={cashBalance}
@@ -680,7 +907,10 @@ export function PaperTradingPanel() {
                 <th className="px-3 py-2">Side</th>
                 <th className="px-3 py-2">Entry</th>
                 <th className="px-3 py-2">Mark</th>
+                <th className="px-3 py-2">SL</th>
+                <th className="px-3 py-2">TP</th>
                 <th className="px-3 py-2">Live P&L</th>
+                <th className="px-3 py-2">Duration</th>
                 <th className="px-3 py-2">Lots</th>
                 <th className="px-3 py-2">Mode</th>
                 <th className="px-3 py-2">Expiry</th>
@@ -693,6 +923,7 @@ export function PaperTradingPanel() {
                   (new Date(p.expiry).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
                 const liveMark = liveMarkForPosition(p);
                 const mark = liveMark ?? p.entryPremium;
+                const { stopLoss, takeProfit } = levelsFor(p);
                 // Live P&L: BUY (mark - entry) * lot * lots; SELL (entry - mark) * lot * lots
                 const livePnl =
                   liveMark == null
@@ -723,6 +954,12 @@ export function PaperTradingPanel() {
                         </span>
                       )}
                     </td>
+                    <td className="px-3 py-2 tabular-nums text-binance-bear">
+                      {stopLoss.toFixed(2)}
+                    </td>
+                    <td className="px-3 py-2 tabular-nums text-binance-bull">
+                      {takeProfit.toFixed(2)}
+                    </td>
                     <td
                       className={`px-3 py-2 font-medium tabular-nums ${
                         livePnl == null
@@ -737,6 +974,12 @@ export function PaperTradingPanel() {
                         : `${livePnl >= 0 ? "+" : ""}₹${livePnl.toLocaleString("en-IN", {
                             maximumFractionDigits: 0,
                           })}`}
+                    </td>
+                    <td
+                      className="px-3 py-2 tabular-nums text-binance-text"
+                      title={p.openedAt ? `Opened ${p.openedAt}` : undefined}
+                    >
+                      {formatDuration(p.openedAt, now)}
                     </td>
                     <td className="px-3 py-2">{p.lots}</td>
                     <td className="px-3 py-2">{p.mode}</td>
@@ -760,7 +1003,7 @@ export function PaperTradingPanel() {
               })}
               {!open.length && (
                 <tr>
-                  <td className="px-3 py-3 text-binance-muted" colSpan={9}>
+                  <td className="px-3 py-3 text-binance-muted" colSpan={12}>
                     No open positions
                   </td>
                 </tr>
@@ -773,22 +1016,87 @@ export function PaperTradingPanel() {
 
       <section className="space-y-2">
         <h2 className="text-sm font-medium text-binance-muted">Closed / expired</h2>
-        <ul className="space-y-1 text-xs text-binance-muted">
-          {closed.map((p) => (
-            <li key={p.id}>
-              {p.underlying} {p.strike}
-              {p.optionType} {p.action} → {p.status} · P&L{" "}
-              <span
-                className={
-                  (p.realizedPnl ?? 0) >= 0 ? "text-binance-bull" : "text-binance-bear"
-                }
-              >
-                ₹{(p.realizedPnl ?? 0).toFixed(0)}
-              </span>
-            </li>
-          ))}
-          {!closed.length && <li>No history yet</li>}
-        </ul>
+        <div className="overflow-x-auto rounded-lg border border-binance-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-binance-elevated text-binance-muted">
+              <tr>
+                <th className="px-3 py-2">Contract</th>
+                <th className="px-3 py-2">Side</th>
+                <th className="px-3 py-2">Entry</th>
+                <th className="px-3 py-2">Exit</th>
+                <th className="px-3 py-2">SL</th>
+                <th className="px-3 py-2">TP</th>
+                <th className="px-3 py-2">P&L</th>
+                <th className="px-3 py-2">Duration</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...closed]
+                .sort((a, b) => {
+                  const ta = a.closedAt ? new Date(a.closedAt).getTime() : 0;
+                  const tb = b.closedAt ? new Date(b.closedAt).getTime() : 0;
+                  return tb - ta;
+                })
+                .map((p) => {
+                  const { stopLoss, takeProfit } = levelsFor(p);
+                  const endMs = p.closedAt
+                    ? new Date(p.closedAt).getTime()
+                    : now;
+                  const pnl = p.realizedPnl ?? 0;
+                  return (
+                    <tr key={p.id} className="border-t border-binance-border/60">
+                      <td className="px-3 py-2">
+                        {p.underlying} {p.strike} {p.optionType}
+                      </td>
+                      <td className="px-3 py-2">{p.action}</td>
+                      <td className="px-3 py-2 tabular-nums">{p.entryPremium}</td>
+                      <td className="px-3 py-2 tabular-nums">
+                        {p.exitPremium != null ? Number(p.exitPremium).toFixed(2) : "—"}
+                      </td>
+                      <td className="px-3 py-2 tabular-nums text-binance-bear">
+                        {stopLoss.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-2 tabular-nums text-binance-bull">
+                        {takeProfit.toFixed(2)}
+                      </td>
+                      <td
+                        className={`px-3 py-2 font-medium tabular-nums ${
+                          pnl >= 0 ? "text-binance-bull" : "text-binance-bear"
+                        }`}
+                      >
+                        {pnl >= 0 ? "+" : ""}₹
+                        {pnl.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                      </td>
+                      <td className="px-3 py-2 tabular-nums">
+                        {formatDuration(p.openedAt, endMs)}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={
+                            p.closeReason === "TP"
+                              ? "text-binance-bull"
+                              : p.closeReason === "SL"
+                                ? "text-binance-bear"
+                                : "text-binance-muted"
+                          }
+                        >
+                          {closeReasonLabel(p.closeReason, p.status)}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              {!closed.length && (
+                <tr>
+                  <td className="px-3 py-3 text-binance-muted" colSpan={9}>
+                    No history yet
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </section>
     </div>
   );

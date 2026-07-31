@@ -122,3 +122,47 @@ export function unrealizedPnl(params: {
         lots: params.lots,
       });
 }
+
+export type CloseReason = "MANUAL" | "TP" | "SL" | "EXPIRED";
+
+/**
+ * Default premium TP/SL for paper options (not spot levels).
+ * BUY: SL = 0.6·entry (≈40% premium loss); risk = 0.4·entry; TP = entry + 2·risk = 1.8·entry
+ * SELL: SL = 1.4·entry (≈40% adverse); risk = 0.4·entry; TP = entry − 2·risk = 0.2·entry
+ */
+export function defaultPremiumTpSl(
+  action: TradeAction,
+  entryPremium: number,
+): { stopLoss: number; takeProfit: number } {
+  const entry = Math.max(0, entryPremium);
+  if (action === "BUY") {
+    const stopLoss = Number((entry * 0.6).toFixed(2));
+    const risk = entry - stopLoss; // 0.4·entry
+    const takeProfit = Number((entry + 2 * risk).toFixed(2)); // 1.8·entry
+    return { stopLoss, takeProfit };
+  }
+  const stopLoss = Number((entry * 1.4).toFixed(2));
+  const risk = stopLoss - entry; // 0.4·entry
+  const takeProfit = Number(Math.max(0, entry - 2 * risk).toFixed(2)); // 0.2·entry
+  return { stopLoss, takeProfit };
+}
+
+/** Which exit level (if any) the live mark has hit. */
+export function premiumExitHit(params: {
+  action: TradeAction;
+  markPremium: number;
+  stopLoss: number | null | undefined;
+  takeProfit: number | null | undefined;
+}): "TP" | "SL" | null {
+  const { action, markPremium, stopLoss, takeProfit } = params;
+  if (action === "BUY") {
+    // Long: profit when premium rises to TP; stop when premium falls to SL
+    if (takeProfit != null && markPremium >= takeProfit) return "TP";
+    if (stopLoss != null && markPremium <= stopLoss) return "SL";
+    return null;
+  }
+  // Short: profit when premium falls to TP; stop when premium rises to SL
+  if (takeProfit != null && markPremium <= takeProfit) return "TP";
+  if (stopLoss != null && markPremium >= stopLoss) return "SL";
+  return null;
+}
