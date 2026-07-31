@@ -83,16 +83,18 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
 - Stage 2.5 stubs: Sentiment + Macro (neutral score 0 — labeled stubs)
 - Stage 3: Directional + structure synthesis, TradeIdea model, analysis UI
+- Stage 3.1: Synthesized verdict card — ATR trade plan (Entry/SL/TP1/TP2 + R:R), regime (TRENDING/CHOPPY/VOLATILE), lane alignment, experimental edge from track-record (no ML), Mark as taken → paper
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
-- Dashboard (default `/`): index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). Gift Nifty is labeled demo — not in Angel One OpenAPI scrip master.
+- Dashboard (default `/`): index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). Gift Nifty live via free NSE IX mirror (`live.giftcitynifty.com`); Nifty proxy only if that feed fails.
+- Dashboard macro strip (`/api/dashboard/macro`): Gift Nifty proxy, India VIX (NSE/Yahoo), US (Dow/Nasdaq/S&P), Asian indices, WTI/Brent crude, DXY, USDINR; this-week economic highlights (Fed/CPI/GDP/NFP/RBI when present); today’s news via Google/Yahoo RSS. Free unofficial APIs — no paid keys. News/events show heuristic **BULL / BEAR / MIXED** bias pills (keyword + print-vs-forecast; labeled experimental). Index + macro quotes auto-refresh ~15s (silent; pauses when tab hidden).
 - Paper option chain: live NSE India OC for NIFTY/BANKNIFTY (Call/Put LTP + OI + % change, ~20s refresh); Groww-style spot marker between strikes.
 
 ### Not Yet
 - Live Sentiment lane (news / FII-DII feeds)
 - Live Macro lane (India VIX / USDINR / SGX Nifty / crude)
-- Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses labeled mock)
+- Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
 - TimescaleDB IV time-series store (IV trend currently from live + candle-derived proxy)
 - Upstash Redis pub/sub for scalp second-level polling
 - Real broker order placement (intentionally out of scope)
@@ -103,8 +105,11 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 |--------|----------|------|---------------------|----------|
 | Angel One SmartAPI | Auth (TOTP), LTP, historical OHLCV, market quote FULL (OI/IV), scrip master for option chain | Free tier (SmartAPI app) | Session valid until midnight; historical intervals have day-range caps (e.g. ONE_MINUTE ≈ 30 days); throttle client to ~3–5 req/s; retry/backoff on 5xx/429 | Typed `MarketDataUnavailableError`; demo mock mode if credentials missing |
 | OpenAPI Scrip Master JSON | Symbol tokens for NIFTY/BANKNIFTY/SENSEX options | Free public dump | Cache locally; refresh periodically | Cached file / demo strikes |
-| Gift Nifty (NSE IFSC) | Dashboard quote card | N/A via SmartAPI | Not present in OpenAPIScripMaster (no AMXIDX/NSEIX row) | Labeled Nifty 50 proxy on Dashboard |
-| Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN | Free unofficial | Soft rate limits; may 429 | NSE `allIndices` spot for Nifty/Bank Nifty; then labeled demo |
+| Gift Nifty (NSE IFSC / NSE IX) | Dashboard + macro Gift Nifty card | Free via `live.giftcitynifty.com/api/gift-nifty` | Soft limits; unofficial mirror of NSE IX | Labeled Nifty 50 proxy if feed down |
+| Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN; macro quotes (US/Asia indices, ^INDIAVIX, CL=F, BZ=F, DX-Y.NYB, INR=X) | Free unofficial | Soft rate limits; may 429; `/v7/quote` often Unauthorized — use `/v8/finance/chart` | NSE `allIndices` spot for Nifty/Bank Nifty/India VIX; then labeled demo |
+| NSE India `allIndices` | Nifty / Bank Nifty / India VIX spot fallback | Free public | Cookie/UA soft limits | Yahoo chart; labeled demo |
+| Forex Factory week JSON (`nfs.faireconomy.media`) | Dashboard economic calendar (Fed/CPI/GDP/NFP; RBI when listed) | Free unofficial mirror | Soft limits; INR/RBI coverage sparse | Empty buckets + UI note |
+| Google News RSS + Yahoo Finance RSS | Dashboard “Today's News” headlines | Free public RSS | Soft limits / regional variance | Empty list + UI note |
 | NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY | Free public | Cookie session + soft rate limits; SENSEX not on this API | Angel One quote FULL; then labeled demo mocks |
 | Upstash Redis | Optional cache; future scalp pub/sub | Free tier limits apply | Per-plan | No-op client when env missing |
 

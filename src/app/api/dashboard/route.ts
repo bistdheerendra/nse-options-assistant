@@ -6,7 +6,11 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const data = await getDashboardQuotes();
-    return NextResponse.json({ ok: true, ...data });
+    return NextResponse.json({
+      ok: true,
+      fetchedAt: new Date().toISOString(),
+      ...data,
+    });
   } catch (err) {
     if (isMarketDataUnavailable(err)) {
       return NextResponse.json(

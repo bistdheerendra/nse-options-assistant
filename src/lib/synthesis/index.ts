@@ -5,9 +5,21 @@ import { runSentimentLane } from "@/lib/lanes/sentiment";
 import { runTechnicalLane } from "@/lib/lanes/technical";
 import type { TradingMode } from "@/lib/lanes/types";
 import { hasDatabase, prisma } from "@/lib/prisma";
+import { computeTrackRecord } from "@/lib/backtest/trackRecord";
+import { computeLaneAlignment } from "./alignment";
 import { synthesizeDirectional } from "./directional";
+import { detectRegime } from "./regime";
 import { synthesizeStructure } from "./structure";
+import { buildTradePlan } from "./tradePlan";
 import type { Prisma } from "@prisma/client";
+
+export type ExperimentalEdge = {
+  winRatePct: number | null;
+  sampleSize: number;
+  branch: string;
+  label: string;
+  experimental: true;
+};
 
 export type SynthesisResult = {
   underlying: Underlying;
@@ -26,10 +38,53 @@ export type SynthesisResult = {
   daysToExpiry: number | null;
   tradeIdeaId: string | null;
   persisted: boolean;
+  regime: ReturnType<typeof detectRegime>;
+  alignment: ReturnType<typeof computeLaneAlignment>;
+  tradePlan: ReturnType<typeof buildTradePlan>;
+  experimentalEdge: ExperimentalEdge;
+  spot: number;
+  expiry: string;
 };
 
 function daysBetween(a: Date, b: Date): number {
   return Math.max(0, (b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+async function edgeForBranch(branch: string): Promise<ExperimentalEdge> {
+  try {
+    const tr = await computeTrackRecord();
+    const cohort =
+      tr.byBranch.find((b) => b.branch === branch) ??
+      (branch === "NO_TRADE" ? null : tr.overall);
+    if (!cohort || cohort.sampleSize === 0) {
+      return {
+        winRatePct: null,
+        sampleSize: 0,
+        branch,
+        label: "Experimental / unvalidated — no track-record sample yet.",
+        experimental: true,
+      };
+    }
+    return {
+      winRatePct: Math.round(cohort.winRate * 100),
+      sampleSize: cohort.sampleSize,
+      branch: cohort.branch,
+      label: cohort.label,
+      experimental: true,
+    };
+  } catch {
+    return {
+      winRatePct: null,
+      sampleSize: 0,
+      branch,
+      label: "Experimental / unvalidated — track record unavailable.",
+      experimental: true,
+    };
+  }
 }
 
 export async function runSynthesis(params: {
@@ -58,6 +113,46 @@ export async function runSynthesis(params: {
     mode,
   );
   const structure = synthesizeStructure(directional.verdict, optionsFlow.extras);
+
+  const atr = num(technical.rawIndicators.atr14);
+  const regime = detectRegime({
+    spot: chain.spot,
+    atr,
+    ema50: num(technical.rawIndicators.ema50) ?? undefined,
+    ema200: num(technical.rawIndicators.ema200) ?? undefined,
+  });
+
+  const alignment = computeLaneAlignment(directional.verdict, {
+    technical,
+    optionsFlow,
+    sentiment,
+    macro,
+  });
+
+  const aligningLanes = Object.entries(alignment.perLane)
+    .filter(([, v]) => v === "aligned")
+    .map(([k]) => k);
+
+  const tradePlan = buildTradePlan({
+    spot: chain.spot,
+    atr,
+    mode,
+    verdict: directional.verdict,
+    structure,
+    chain,
+    swingHigh: num(technical.rawIndicators.swingHigh),
+    swingLow: num(technical.rawIndicators.swingLow),
+    laneNotes:
+      aligningLanes.length > 0
+        ? [
+            `${aligningLanes.map((n) => n[0]!.toUpperCase() + n.slice(1)).join(" + ")} lane(s) flag ${
+              directional.verdict === "BULLISH" ? "upside" : "downside"
+            } bias.`,
+          ]
+        : undefined,
+  });
+
+  const experimentalEdge = await edgeForBranch(structure.branch);
 
   const expiryDate = new Date(chain.expiry);
   const dte = daysBetween(new Date(), expiryDate);
@@ -88,6 +183,10 @@ export async function runSynthesis(params: {
     expiry: chain.expiry,
     directional,
     structure,
+    regime,
+    alignment,
+    tradePlan,
+    experimentalEdge,
     lanes: {
       technical: { score: technical.score, signals: technical.signals, rawIndicators: technical.rawIndicators },
       optionsFlow: {
@@ -143,7 +242,16 @@ export async function runSynthesis(params: {
     daysToExpiry: dte,
     tradeIdeaId,
     persisted,
+    regime,
+    alignment,
+    tradePlan,
+    experimentalEdge,
+    spot: chain.spot,
+    expiry: chain.expiry,
   };
 }
 
 export { synthesizeDirectional, synthesizeStructure };
+export { buildTradePlan } from "./tradePlan";
+export { detectRegime } from "./regime";
+export { computeLaneAlignment } from "./alignment";

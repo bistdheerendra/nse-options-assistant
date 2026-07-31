@@ -1,8 +1,14 @@
 "use client";
 
 import { IndexQuoteCard, type IndexCardData } from "@/components/IndexQuoteCard";
+import { MacroDashboard } from "@/components/MacroDashboard";
+import {
+  LIVE_QUOTE_POLL_MS,
+  useLivePoll,
+  useRelativeClock,
+} from "@/hooks/useLivePoll";
 import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 
 type DashboardResponse = {
   ok: boolean;
@@ -10,37 +16,43 @@ type DashboardResponse = {
   demoMode?: boolean;
   error?: string;
   uiHint?: string;
+  fetchedAt?: string;
 };
 
 export function DashboardPanel() {
   const [cards, setCards] = useState<IndexCardData[]>([]);
   const [demoMode, setDemoMode] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<string | null>(null);
+  const ago = useRelativeClock(fetchedAt);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async ({ silent }: { silent: boolean }) => {
+    if (silent) setRefreshing(true);
+    else setLoading(true);
+    if (!silent) setError(null);
     try {
-      const res = await fetch("/api/dashboard");
+      const res = await fetch(`/api/dashboard?t=${Date.now()}`, {
+        cache: "no-store",
+      });
       const json = (await res.json()) as DashboardResponse;
       if (!res.ok || !json.ok) {
         throw new Error(json.uiHint ?? json.error ?? "Failed to load dashboard");
       }
       setCards(json.cards ?? []);
       setDemoMode(Boolean(json.demoMode));
+      setFetchedAt(json.fetchedAt ?? new Date().toISOString());
+      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      if (!silent) setError(e instanceof Error ? e.message : "Failed");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-    const id = window.setInterval(() => void load(), 60_000);
-    return () => window.clearInterval(id);
-  }, [load]);
+  useLivePoll(load, LIVE_QUOTE_POLL_MS);
 
   return (
     <div className="space-y-6">
@@ -50,17 +62,19 @@ export function DashboardPanel() {
             Dashboard
           </h1>
           <p className="mt-1 text-sm text-binance-muted">
-            Live index LTP · Nifty 50, Bank Nifty, Sensex, Gift Nifty
+            Live index LTP · auto-refresh ~{LIVE_QUOTE_POLL_MS / 1000}s · Nifty
+            50, Bank Nifty, Sensex, Gift Nifty · Global & macro below
             {demoMode ? " · Angel lanes still in demo mode" : ""}
+            {ago ? ` · Updated ${ago}` : ""}
           </p>
         </div>
         <button
           type="button"
-          onClick={() => void load()}
-          disabled={loading}
+          onClick={() => void load({ silent: false })}
+          disabled={loading || refreshing}
           className="inline-flex items-center gap-2 rounded bg-binance-gold px-3 py-2 text-sm font-semibold text-binance-bg disabled:opacity-60"
         >
-          {loading ? (
+          {loading || refreshing ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <RefreshCw className="h-4 w-4" />
@@ -88,6 +102,10 @@ export function DashboardPanel() {
           ))}
         </div>
       )}
+
+      <div className="border-t border-binance-border pt-6">
+        <MacroDashboard />
+      </div>
     </div>
   );
 }

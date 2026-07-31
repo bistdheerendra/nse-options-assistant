@@ -1,4 +1,5 @@
 import type { DashboardIndex } from "@/lib/marketdata/angelone/dashboardIndices";
+import { fetchGiftNiftyQuote } from "@/lib/marketdata/giftNifty";
 
 export type PublicIndexQuote = {
   id: DashboardIndex;
@@ -162,18 +163,29 @@ export async function fetchPublicDashboardQuotes(): Promise<
     ),
   );
 
-  // Gift Nifty is not on Yahoo/NSE allIndices. Use Nifty as labeled proxy
-  // until a SmartAPI / IFSC feed is available.
-  const nifty = out.NIFTY;
-  if (nifty) {
+  // Gift Nifty — live NSE IX via giftcitynifty free API; Nifty proxy fallback
+  const gift = await fetchGiftNiftyQuote();
+  if (gift) {
     out.GIFTNIFTY = {
       id: "GIFTNIFTY",
-      ltp: nifty.ltp,
-      prevClose: nifty.prevClose,
-      candles: nifty.candles,
-      source: "Nifty proxy",
-      note: "Gift Nifty feed unavailable via SmartAPI/Yahoo — showing Nifty 50 as labeled proxy.",
+      ltp: gift.ltp,
+      prevClose: gift.prevClose,
+      candles: gift.candles,
+      source: gift.source,
+      note: gift.note,
     };
+  } else {
+    const nifty = out.NIFTY;
+    if (nifty) {
+      out.GIFTNIFTY = {
+        id: "GIFTNIFTY",
+        ltp: nifty.ltp,
+        prevClose: nifty.prevClose,
+        candles: nifty.candles,
+        source: "Nifty proxy",
+        note: "Gift Nifty live feed unavailable — showing Nifty 50 as labeled proxy.",
+      };
+    }
   }
 
   return out;

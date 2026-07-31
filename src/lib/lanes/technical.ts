@@ -4,6 +4,7 @@ import {
   type OhlcvCandle,
   type Underlying,
 } from "@/lib/marketdata/angelone";
+import { calcAtr } from "@/lib/indicators/atr";
 import { clampScore, type LaneResult, type TradingMode } from "./types";
 
 function ema(values: number[], period: number): number[] {
@@ -130,6 +131,7 @@ export async function runTechnicalLane(params: {
   const rsi14 = rsi(closes, 14);
   const swings = swingPoints(candles);
   const patterns = candlePatterns(candles[last]!, candles[last - 1]);
+  const atr14 = calcAtr(candles, 14);
 
   const signals: string[] = [];
   let score = 0;
@@ -189,6 +191,7 @@ export async function runTechnicalLane(params: {
       ema200: e200,
       rsi14,
       lastClose,
+      atr14,
       swingHigh: swings.swingHigh,
       swingLow: swings.swingLow,
       patterns,
