@@ -9,6 +9,7 @@
     "lint": "eslint",
     "postinstall": "prisma generate",
     "test:lanes": "tsx scripts/test-lanes.ts",
+    "test:backtest": "tsx scripts/test-backtest.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",
     "db:push": "prisma db push"
   },

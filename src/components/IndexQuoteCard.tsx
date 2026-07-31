@@ -1,9 +1,11 @@
 "use client";
 
 import { MiniCandleChart } from "@/components/MiniCandleChart";
+import { LiveBadge } from "@/components/LiveBadge";
 import { theme } from "@/lib/theme";
 import { Link2 } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 
 export type IndexCardData = {
   id: string;
@@ -26,12 +28,37 @@ function formatPrice(n: number) {
   });
 }
 
-export function IndexQuoteCard({ card }: { card: IndexCardData }) {
+export function IndexQuoteCard({
+  card,
+  live = true,
+}: {
+  card: IndexCardData;
+  live?: boolean;
+}) {
   const up = card.change >= 0;
   const changeColor = up ? theme.colors.bull : theme.colors.bear;
   const href = card.analysisUnderlying
     ? `/analysis?underlying=${card.analysisUnderlying}`
     : null;
+
+  const prevLtp = useRef(card.ltp);
+  const [flash, setFlash] = useState<"up" | "down" | null>(null);
+
+  useEffect(() => {
+    if (prevLtp.current === card.ltp) return;
+    const dir = card.ltp > prevLtp.current ? "up" : "down";
+    prevLtp.current = card.ltp;
+    setFlash(dir);
+    const id = window.setTimeout(() => setFlash(null), 450);
+    return () => window.clearTimeout(id);
+  }, [card.ltp]);
+
+  const flashColor =
+    flash === "up"
+      ? theme.colors.bull
+      : flash === "down"
+        ? theme.colors.bear
+        : theme.colors.text;
 
   return (
     <article className="flex flex-col rounded-xl border border-binance-border bg-binance-surface p-4">
@@ -49,6 +76,7 @@ export function IndexQuoteCard({ card }: { card: IndexCardData }) {
             </p>
           )}
         </div>
+        <LiveBadge active={live && !card.demo} />
       </div>
 
       <div className="mb-3 flex justify-center py-1">
@@ -58,8 +86,8 @@ export function IndexQuoteCard({ card }: { card: IndexCardData }) {
       <div className="mt-auto flex items-end justify-between gap-3">
         <div>
           <p
-            className="text-2xl font-semibold tabular-nums leading-tight"
-            style={{ color: theme.colors.text }}
+            className="text-2xl font-semibold tabular-nums leading-tight transition-colors duration-300"
+            style={{ color: flashColor }}
           >
             {formatPrice(card.ltp)}
           </p>

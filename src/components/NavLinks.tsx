@@ -1,7 +1,4 @@
-"use client";
-
-import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { NavLink } from "@/components/NavLink";
 
 const LINKS = [
   { href: "/", label: "Dashboard" },
@@ -10,29 +7,13 @@ const LINKS = [
   { href: "/backtest", label: "Track Record" },
 ] as const;
 
+/** Server component: static labels come from SSR so HMR can't desync text. */
 export function NavLinks() {
-  const pathname = usePathname();
-
   return (
     <nav className="flex flex-wrap gap-4 text-sm">
-      {LINKS.map(({ href, label }) => {
-        const active =
-          href === "/" ? pathname === "/" : pathname.startsWith(href);
-        return (
-          <Link
-            key={href}
-            href={href}
-            className={
-              active
-                ? "font-medium text-binance-gold"
-                : "text-binance-muted hover:text-binance-text"
-            }
-            aria-current={active ? "page" : undefined}
-          >
-            {label}
-          </Link>
-        );
-      })}
+      {LINKS.map(({ href, label }) => (
+        <NavLink key={href} href={href} label={label} />
+      ))}
     </nav>
   );
 }

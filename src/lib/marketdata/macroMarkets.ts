@@ -1,4 +1,5 @@
 import { fetchGiftNiftyQuote } from "./giftNifty";
+import { withTtlCache } from "./ttlCache";
 import { fetchYahooQuotesBatched } from "./yahooQuote";
 
 export type MacroQuote = {
@@ -12,6 +13,10 @@ export type MacroQuote = {
   source: string;
   note: string | null;
 };
+
+/** Shared TTL for dashboard + Macro lane — avoid double-hitting free upstreams. */
+export const MACRO_QUOTES_TTL_MS = 12_000;
+export const MACRO_QUOTES_CACHE_KEY = "macro:quotes";
 
 type Spec = {
   id: string;
@@ -155,4 +160,16 @@ export async function fetchMacroMarketQuotes(): Promise<MacroQuote[]> {
   }
 
   return quotes;
+}
+
+/**
+ * Single source of truth for macro quotes used by `/api/dashboard/macro` and the Macro lane.
+ * In-process TTL coalesce so scalp/synthesis re-runs do not hammer Yahoo / NSE / Gift.
+ */
+export function getCachedMacroQuotes(): Promise<MacroQuote[]> {
+  return withTtlCache(
+    MACRO_QUOTES_CACHE_KEY,
+    MACRO_QUOTES_TTL_MS,
+    fetchMacroMarketQuotes,
+  );
 }

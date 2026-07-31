@@ -48,10 +48,13 @@ model TradeIdea {
   confidenceLabel    String
   /// Full lane rawIndicators + scores + IV regime at decision time
   featureSnapshot    Json
+  /// lanes-v1-2lane-effective | lanes-v2-4lane — additive cohort tag
+  synthesisVersion   String?
   createdAt          DateTime           @default(now())
 
   @@index([underlying, createdAt])
   @@index([structureAction, createdAt])
+  @@index([synthesisVersion, createdAt])
 }
 
 model PaperOptionsAccount {
@@ -93,17 +96,20 @@ model OptionsPosition {
 
 /// Closed-idea outcomes for time-ordered track record
 model BacktestOutcome {
-  id              String   @id @default(cuid())
-  tradeIdeaId     String?
-  underlying      String
-  mode            TradingMode
-  structureBranch String
-  laneScores      Json
-  realizedPnl     Float
-  won             Boolean
-  decidedAt       DateTime
-  resolvedAt      DateTime @default(now())
+  id               String   @id @default(cuid())
+  tradeIdeaId      String?
+  underlying       String
+  mode             TradingMode
+  structureBranch  String
+  laneScores       Json
+  realizedPnl      Float
+  won              Boolean
+  decidedAt        DateTime
+  resolvedAt       DateTime @default(now())
+  /// lanes-v1-2lane-effective | lanes-v2-4lane — additive cohort tag
+  synthesisVersion String?
 
   @@index([structureBranch, decidedAt])
   @@index([decidedAt])
+  @@index([synthesisVersion, decidedAt])
 }

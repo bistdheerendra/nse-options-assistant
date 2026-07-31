@@ -5,7 +5,11 @@ import { runSentimentLane } from "@/lib/lanes/sentiment";
 import { runTechnicalLane } from "@/lib/lanes/technical";
 import type { TradingMode } from "@/lib/lanes/types";
 import { hasDatabase, prisma } from "@/lib/prisma";
-import { computeTrackRecord } from "@/lib/backtest/trackRecord";
+import {
+  computeTrackRecord,
+  edgeFromTrackRecord,
+} from "@/lib/backtest/trackRecord";
+import { CURRENT_SYNTHESIS_VERSION } from "@/lib/backtest/synthesisVersion";
 import { computeLaneAlignment } from "./alignment";
 import { synthesizeDirectional } from "./directional";
 import { detectRegime } from "./regime";
@@ -19,6 +23,9 @@ export type ExperimentalEdge = {
   branch: string;
   label: string;
   experimental: true;
+  synthesisVersion?: string;
+  insufficientSample?: boolean;
+  legacySampleSize?: number;
 };
 
 export type SynthesisResult = {
@@ -57,25 +64,7 @@ function num(v: unknown): number | null {
 async function edgeForBranch(branch: string): Promise<ExperimentalEdge> {
   try {
     const tr = await computeTrackRecord();
-    const cohort =
-      tr.byBranch.find((b) => b.branch === branch) ??
-      (branch === "NO_TRADE" ? null : tr.overall);
-    if (!cohort || cohort.sampleSize === 0) {
-      return {
-        winRatePct: null,
-        sampleSize: 0,
-        branch,
-        label: "Experimental / unvalidated — no track-record sample yet.",
-        experimental: true,
-      };
-    }
-    return {
-      winRatePct: Math.round(cohort.winRate * 100),
-      sampleSize: cohort.sampleSize,
-      branch: cohort.branch,
-      label: cohort.label,
-      experimental: true,
-    };
+    return edgeFromTrackRecord(tr, branch);
   } catch {
     return {
       winRatePct: null,
@@ -83,6 +72,9 @@ async function edgeForBranch(branch: string): Promise<ExperimentalEdge> {
       branch,
       label: "Experimental / unvalidated — track record unavailable.",
       experimental: true,
+      synthesisVersion: CURRENT_SYNTHESIS_VERSION,
+      insufficientSample: true,
+      legacySampleSize: 0,
     };
   }
 }
@@ -181,6 +173,7 @@ export async function runSynthesis(params: {
     mode,
     spot: chain.spot,
     expiry: chain.expiry,
+    synthesisVersion: CURRENT_SYNTHESIS_VERSION,
     directional,
     structure,
     regime,
@@ -216,6 +209,7 @@ export async function runSynthesis(params: {
           reasoning: structure.reasoning,
           confidenceLabel,
           featureSnapshot: featureSnapshot as Prisma.InputJsonValue,
+          synthesisVersion: CURRENT_SYNTHESIS_VERSION,
         },
       });
       tradeIdeaId = row.id;

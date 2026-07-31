@@ -12,7 +12,13 @@ export type DirectionalResult = {
 
 /**
  * Weighted combination of lane scores.
- * Sentiment/Macro are stubs (0) until Stage 2.5 — weighting is therefore incomplete.
+ * All four lanes are live (Stage 2.5b). Each lane's own scoring remains
+ * rules-based / heuristic — not ML-validated (see Section 6 track-record gate).
+ *
+ * Scalp weights: OI/momentum dominate; Sentiment 0.10 (FII/DII is daily-lagged),
+ * Macro 0.10 (overnight cues matter less tick-to-tick).
+ * Swing weights: Macro 0.20 + Sentiment 0.15 for multi-day FII/news/global context;
+ * Technical 0.40 + Options Flow 0.25 for structure/trend.
  */
 export function synthesizeDirectional(
   lanes: {
@@ -23,7 +29,6 @@ export function synthesizeDirectional(
   },
   mode: TradingMode,
 ): DirectionalResult {
-  // Scalp: momentum / OI flow heavier; Swing: trend + (future) FII/macro heavier
   const weights =
     mode === "SCALP"
       ? { technical: 0.35, optionsFlow: 0.45, sentiment: 0.1, macro: 0.1 }
@@ -46,10 +51,13 @@ export function synthesizeDirectional(
   const notes = [
     "Rules-based heuristic — not a validated statistical edge (no backtest gate passed yet for live claims).",
   ];
-  if (lanes.sentiment.rawIndicators.stub || lanes.macro.rawIndicators.stub) {
+  if (lanes.sentiment.rawIndicators.unavailable) {
     notes.push(
-      "Sentiment + Macro lanes are stubs (score 0). Stage 2.5 required before weighting is real.",
+      "Sentiment lane degraded — data unavailable; score forced to 0 this run.",
     );
+  }
+  if (lanes.macro.rawIndicators.unavailable) {
+    notes.push("Macro lane degraded — data unavailable; score forced to 0 this run.");
   }
 
   let verdict: DirectionalVerdict = "NEUTRAL";

@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * Live dashboard polling — silent background refresh, pauses when tab hidden.
+ * Uses chained timeouts (not overlapping intervals) so slow fetches don't stack.
  */
 export function useLivePoll(
   load: (opts: { silent: boolean }) => Promise<void>,
@@ -14,39 +15,53 @@ export function useLivePoll(
 
   useEffect(() => {
     let timer: number | null = null;
+    let cancelled = false;
+    let inFlight = false;
 
-    const tick = (silent: boolean) => {
-      void loadRef.current({ silent });
-    };
-
-    const start = () => {
-      if (timer != null) return;
-      timer = window.setInterval(() => {
-        if (document.visibilityState === "visible") tick(true);
-      }, intervalMs);
-    };
-
-    const stop = () => {
+    const clear = () => {
       if (timer != null) {
-        window.clearInterval(timer);
+        window.clearTimeout(timer);
         timer = null;
       }
     };
 
-    tick(false);
-    start();
+    const schedule = (delayMs: number) => {
+      clear();
+      timer = window.setTimeout(() => {
+        void run(true);
+      }, delayMs);
+    };
+
+    const run = async (silent: boolean) => {
+      if (cancelled || inFlight) return;
+      if (document.visibilityState !== "visible" && silent) {
+        schedule(intervalMs);
+        return;
+      }
+      inFlight = true;
+      try {
+        await loadRef.current({ silent });
+      } finally {
+        inFlight = false;
+        if (!cancelled && document.visibilityState === "visible") {
+          schedule(intervalMs);
+        }
+      }
+    };
+
+    void run(false);
 
     const onVis = () => {
       if (document.visibilityState === "visible") {
-        tick(true);
-        start();
+        void run(true);
       } else {
-        stop();
+        clear();
       }
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      stop();
+      cancelled = true;
+      clear();
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [intervalMs]);
@@ -69,5 +84,11 @@ export function useRelativeClock(iso: string | null, tickMs = 1000) {
   return `${Math.floor(min / 60)}h ago`;
 }
 
-/** Index cards + macro quotes poll cadence (free APIs — keep polite). */
-export const LIVE_QUOTE_POLL_MS = 15_000;
+/** Index cards — near-real-time LTP (free APIs; not broker tick stream). */
+export const LIVE_INDEX_POLL_MS = 2_000;
+
+/** Macro quotes / news — keep polite on free upstreams. */
+export const LIVE_MACRO_POLL_MS = 15_000;
+
+/** @deprecated Prefer LIVE_INDEX_POLL_MS / LIVE_MACRO_POLL_MS */
+export const LIVE_QUOTE_POLL_MS = LIVE_INDEX_POLL_MS;

@@ -26,16 +26,42 @@
   --color-binance-muted: var(--binance-muted);
   --color-binance-text: var(--binance-text);
   --color-binance-border: var(--binance-border);
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-ibm-plex-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 body {
   background: var(--binance-bg);
   color: var(--binance-text);
-  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
 * {
   border-color: var(--binance-border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--binance-border) var(--binance-bg);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--binance-bg);
+  border-radius: 9999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--binance-border);
+  border-radius: 9999px;
+  border: 2px solid var(--binance-bg);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--binance-muted);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }

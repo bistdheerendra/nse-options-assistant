@@ -1,5 +1,6 @@
 import type { DashboardIndex } from "@/lib/marketdata/angelone/dashboardIndices";
 import { fetchGiftNiftyQuote } from "@/lib/marketdata/giftNifty";
+import { withTtlCache } from "@/lib/marketdata/ttlCache";
 
 export type PublicIndexQuote = {
   id: DashboardIndex;
@@ -15,6 +16,11 @@ const YAHOO_SYMBOL: Record<Exclude<DashboardIndex, "GIFTNIFTY">, string> = {
   BANKNIFTY: "^NSEBANK",
   SENSEX: "^BSESN",
 };
+
+/** Coalesce concurrent hub ticks / SSE clients (~1s cadence). */
+const LTP_TTL_MS = 750;
+/** Candles change slowly — avoid Yahoo chart hammering. */
+const CANDLE_TTL_MS = 45_000;
 
 type YahooChartResponse = {
   chart?: {
@@ -38,7 +44,11 @@ type YahooChartResponse = {
   };
 };
 
-async function fetchYahooChart(symbol: string): Promise<PublicIndexQuote | null> {
+async function fetchYahooChart(symbol: string): Promise<{
+  ltp: number;
+  prevClose: number;
+  candles: PublicIndexQuote["candles"];
+} | null> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=5m&range=1d`;
   const res = await fetch(url, {
     headers: {
@@ -79,12 +89,9 @@ async function fetchYahooChart(symbol: string): Promise<PublicIndexQuote | null>
   }
 
   return {
-    id: "NIFTY", // overwritten by caller
     ltp,
     prevClose,
     candles: candles.slice(-24),
-    source: "Yahoo Finance",
-    note: null,
   };
 }
 
@@ -97,10 +104,37 @@ type NseIndexRow = {
   percentChange?: number;
 };
 
-/** NSE public allIndices — good for Nifty / Bank Nifty when Yahoo is down. */
-async function fetchNseSpot(
-  id: "NIFTY" | "BANKNIFTY",
-): Promise<{ ltp: number; prevClose: number } | null> {
+type NseSpotMap = Partial<
+  Record<"NIFTY" | "BANKNIFTY" | "SENSEX", { ltp: number; prevClose: number }>
+>;
+
+function matchNseRow(
+  row: NseIndexRow,
+  id: "NIFTY" | "BANKNIFTY" | "SENSEX",
+): boolean {
+  const sym = (row.indexSymbol ?? "").toUpperCase();
+  const name = (row.index ?? "").toUpperCase();
+  if (id === "NIFTY") {
+    return sym === "NIFTY 50" || name === "NIFTY 50";
+  }
+  if (id === "BANKNIFTY") {
+    return (
+      sym === "NIFTY BANK" ||
+      name === "NIFTY BANK" ||
+      sym === "BANKNIFTY" ||
+      name === "NIFTY BANK"
+    );
+  }
+  return (
+    sym === "SENSEX" ||
+    name === "SENSEX" ||
+    sym === "BSE SENSEX" ||
+    name === "BSE SENSEX"
+  );
+}
+
+/** One NSE allIndices pull for Nifty / Bank Nifty / Sensex spot. */
+async function fetchNseSpotMap(): Promise<NseSpotMap> {
   try {
     const res = await fetch("https://www.nseindia.com/api/allIndices", {
       headers: {
@@ -109,62 +143,93 @@ async function fetchNseSpot(
       },
       cache: "no-store",
     });
-    if (!res.ok) return null;
+    if (!res.ok) return {};
     const json = (await res.json()) as { data?: NseIndexRow[] };
-    const want =
-      id === "NIFTY"
-        ? (r: NseIndexRow) =>
-            r.indexSymbol === "NIFTY 50" || r.index === "NIFTY 50"
-        : (r: NseIndexRow) =>
-            r.indexSymbol === "NIFTY BANK" || r.index === "NIFTY BANK";
-    const row = (json.data ?? []).find(want);
-    if (!row?.last) return null;
-    return {
-      ltp: Number(row.last),
-      prevClose: Number(row.previousClose ?? row.last),
-    };
+    const out: NseSpotMap = {};
+    for (const id of ["NIFTY", "BANKNIFTY", "SENSEX"] as const) {
+      const row = (json.data ?? []).find((r) => matchNseRow(r, id));
+      if (row?.last != null && Number.isFinite(Number(row.last))) {
+        out[id] = {
+          ltp: Number(row.last),
+          prevClose: Number(row.previousClose ?? row.last),
+        };
+      }
+    }
+    return out;
   } catch {
-    return null;
+    return {};
   }
 }
 
 /**
  * Live public index quotes for the Dashboard.
  * Angel One SmartAPI remains primary for option chains / lanes; Dashboard
- * uses Yahoo (+ NSE spot fallback) so LTP shows even in MARKETDATA_DEMO_MODE.
+ * uses NSE spot (+ Yahoo candles) so LTP shows even in MARKETDATA_DEMO_MODE.
  */
 export async function fetchPublicDashboardQuotes(): Promise<
   Partial<Record<DashboardIndex, PublicIndexQuote>>
 > {
   const out: Partial<Record<DashboardIndex, PublicIndexQuote>> = {};
 
-  await Promise.all(
-    (Object.keys(YAHOO_SYMBOL) as Array<keyof typeof YAHOO_SYMBOL>).map(
-      async (id) => {
-        const yahoo = await fetchYahooChart(YAHOO_SYMBOL[id]);
-        if (yahoo) {
-          out[id] = { ...yahoo, id };
-          return;
-        }
-        if (id === "NIFTY" || id === "BANKNIFTY") {
-          const nse = await fetchNseSpot(id);
-          if (nse) {
-            out[id] = {
+  const nseSpots = await withTtlCache(
+    "dash:nse-spots",
+    LTP_TTL_MS,
+    fetchNseSpotMap,
+  );
+
+  const indexIds = Object.keys(YAHOO_SYMBOL) as Array<keyof typeof YAHOO_SYMBOL>;
+
+  const [indexRows, gift] = await Promise.all([
+    Promise.all(
+      indexIds.map(async (id) => {
+        const nse = nseSpots[id];
+        if (nse) {
+          // Spot from NSE (fast); Yahoo chart only for sparkline, longer TTL
+          const yahoo = await withTtlCache(
+            `dash:yahoo-candles:${id}`,
+            CANDLE_TTL_MS,
+            () => fetchYahooChart(YAHOO_SYMBOL[id]),
+          );
+          return {
+            id,
+            quote: {
               id,
               ltp: nse.ltp,
               prevClose: nse.prevClose,
-              candles: [],
+              candles: yahoo?.candles ?? [],
               source: "NSE India",
               note: null,
-            };
-          }
+            } satisfies PublicIndexQuote,
+          };
         }
-      },
+        // NSE miss — Yahoo LTP at short TTL so cards still feel live
+        const yahoo = await withTtlCache(
+          `dash:yahoo-ltp:${id}`,
+          LTP_TTL_MS,
+          () => fetchYahooChart(YAHOO_SYMBOL[id]),
+        );
+        if (!yahoo) return { id, quote: null };
+        return {
+          id,
+          quote: {
+            id,
+            ltp: yahoo.ltp,
+            prevClose: yahoo.prevClose,
+            candles: yahoo.candles,
+            source: "Yahoo Finance",
+            note: null,
+          } satisfies PublicIndexQuote,
+        };
+      }),
     ),
-  );
+    withTtlCache("dash:gift-nifty", LTP_TTL_MS, fetchGiftNiftyQuote),
+  ]);
+
+  for (const row of indexRows) {
+    if (row.quote) out[row.id] = row.quote;
+  }
 
   // Gift Nifty — live NSE IX via giftcitynifty free API; Nifty proxy fallback
-  const gift = await fetchGiftNiftyQuote();
   if (gift) {
     out.GIFTNIFTY = {
       id: "GIFTNIFTY",

@@ -80,6 +80,8 @@ type SynthesisPayload = {
     sampleSize: number;
     label: string;
     experimental: true;
+    insufficientSample?: boolean;
+    legacySampleSize?: number;
   };
 };
 
@@ -250,13 +252,20 @@ export function AnalysisPanel() {
               >
                 {side}
               </span>
-              <span className="rounded border border-binance-border px-2 py-0.5 text-xs text-binance-muted">
+              <span
+                className="rounded border border-binance-border px-2 py-0.5 text-xs text-binance-muted"
+                title={data.experimentalEdge.label}
+              >
                 {data.experimentalEdge.winRatePct != null
                   ? `Edge: ${data.experimentalEdge.winRatePct}% experimental`
-                  : "Edge: n/a experimental"}
+                  : data.experimentalEdge.insufficientSample
+                    ? "Edge: insufficient post-4-lane sample"
+                    : "Edge: n/a experimental"}
                 {data.experimentalEdge.sampleSize > 0
                   ? ` (n=${data.experimentalEdge.sampleSize})`
-                  : ""}
+                  : data.experimentalEdge.legacySampleSize
+                    ? ` (legacy n=${data.experimentalEdge.legacySampleSize} excluded)`
+                    : ""}
               </span>
               <span
                 className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
@@ -390,8 +399,15 @@ export function AnalysisPanel() {
           <div className="grid gap-3 md:grid-cols-2">
             {Object.entries(data.lanes).map(([name, lane]) => (
               <div key={name} className="rounded-lg bg-binance-surface p-3">
-                <div className="flex items-baseline justify-between">
-                  <p className="text-sm font-medium capitalize">{name}</p>
+                <div className="flex items-baseline justify-between gap-2">
+                  <p className="text-sm font-medium capitalize">
+                    {name}
+                    {(name === "macro" || name === "sentiment") ? (
+                      <span className="ml-1.5 text-[10px] font-normal uppercase tracking-wide text-binance-muted">
+                        heuristic
+                      </span>
+                    ) : null}
+                  </p>
                   <p
                     className={`font-mono text-sm ${
                       lane.score > 0
@@ -405,9 +421,11 @@ export function AnalysisPanel() {
                   </p>
                 </div>
                 <ul className="mt-2 space-y-1 text-xs text-binance-muted">
-                  {lane.signals.slice(0, 4).map((s) => (
-                    <li key={s}>· {s}</li>
-                  ))}
+                  {lane.signals
+                    .slice(0, name === "macro" || name === "sentiment" ? 6 : 4)
+                    .map((s) => (
+                      <li key={s}>· {s}</li>
+                    ))}
                 </ul>
               </div>
             ))}

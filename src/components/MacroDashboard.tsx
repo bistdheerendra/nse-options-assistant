@@ -6,8 +6,9 @@ import {
   type MarketBias,
 } from "@/lib/marketdata/marketBias";
 import { theme } from "@/lib/theme";
+import { LiveBadge } from "@/components/LiveBadge";
 import {
-  LIVE_QUOTE_POLL_MS,
+  LIVE_MACRO_POLL_MS,
   useLivePoll,
   useRelativeClock,
 } from "@/hooks/useLivePoll";
@@ -220,6 +221,7 @@ export function MacroDashboard() {
   const [data, setData] = useState<MacroResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ago = useRelativeClock(data?.fetchedAt ?? null);
 
@@ -236,16 +238,20 @@ export function MacroDashboard() {
         throw new Error(json.uiHint ?? json.error ?? "Failed to load macro data");
       }
       setData(json);
+      setLive(true);
       setError(null);
     } catch (e) {
-      if (!silent) setError(e instanceof Error ? e.message : "Failed");
+      if (!silent) {
+        setLive(false);
+        setError(e instanceof Error ? e.message : "Failed");
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
 
-  useLivePoll(load, LIVE_QUOTE_POLL_MS);
+  useLivePoll(load, LIVE_MACRO_POLL_MS);
 
   const quotes = data?.quotes ?? [];
   const giftVix = [
@@ -261,20 +267,23 @@ export function MacroDashboard() {
     <div className="space-y-6">
       <section className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-binance-text">
-            Global Markets & Macro
-          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold text-binance-text">
+              Global Markets & Macro
+            </h2>
+            <LiveBadge active={live && !loading} />
+          </div>
           <p className="mt-0.5 text-xs text-binance-muted">
-            Live feeds · auto-refresh ~{LIVE_QUOTE_POLL_MS / 1000}s · Yahoo + NSE
-            · Forex Factory · News RSS
+            Live feeds · refresh ~{LIVE_MACRO_POLL_MS / 1000}s · Yahoo + NSE ·
+            Forex Factory · News RSS
             {ago ? ` · Updated ${ago}` : ""}
-            {refreshing ? " · refreshing…" : ""}
+            {refreshing ? " · syncing…" : ""}
           </p>
         </div>
-        {(loading || refreshing) && (
+        {loading && quotes.length === 0 && (
           <span className="inline-flex items-center gap-1.5 text-xs text-binance-muted">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            {loading && quotes.length === 0 ? "Loading…" : "Live"}
+            Loading…
           </span>
         )}
       </section>

@@ -29,6 +29,75 @@ export function biasFromHeadline(title: string): MarketBias {
   return "MIXED";
 }
 
+/** Market-wide / policy headlines get heavier weight than single-name stories. */
+const MARKET_WIDE_RE =
+  /\b(nifty|sensex|bank\s*nifty|rbi|budget|fii|dii|fpi|india\s+market|sgx|gift\s*nifty|repo\s*rate|monetary\s*policy|sebi|crude|usd\s*\/?\s*inr|rupee|vix)\b/i;
+
+export function isMarketWideHeadline(title: string): boolean {
+  return MARKET_WIDE_RE.test(title);
+}
+
+export type NewsBiasAggregate = {
+  /** -1..1 lean from weighted BULL/BEAR counts */
+  score: number;
+  bullCount: number;
+  bearCount: number;
+  mixedCount: number;
+  marketWideCount: number;
+  weightedBull: number;
+  weightedBear: number;
+  headlineCount: number;
+};
+
+/**
+ * Aggregate today's headline bias pills into one directional lean.
+ * Market-wide stories (Nifty/Sensex/RBI/…) weigh 1.5× vs single-stock.
+ * MIXED contributes 0 to the numerator but still dilutes via denominator.
+ */
+export function aggregateNewsBias(
+  titles: string[],
+): NewsBiasAggregate {
+  let bullCount = 0;
+  let bearCount = 0;
+  let mixedCount = 0;
+  let marketWideCount = 0;
+  let weightedBull = 0;
+  let weightedBear = 0;
+  let weightSum = 0;
+
+  for (const title of titles) {
+    const bias = biasFromHeadline(title);
+    const marketWide = isMarketWideHeadline(title);
+    const w = marketWide ? 1.5 : 1;
+    if (marketWide) marketWideCount += 1;
+    weightSum += w;
+    if (bias === "BULL") {
+      bullCount += 1;
+      weightedBull += w;
+    } else if (bias === "BEAR") {
+      bearCount += 1;
+      weightedBear += w;
+    } else {
+      mixedCount += 1;
+    }
+  }
+
+  // score = (weightedBull - weightedBear) / weightSum  ∈ [-1, 1]
+  const score =
+    weightSum > 0 ? (weightedBull - weightedBear) / weightSum : 0;
+
+  return {
+    score,
+    bullCount,
+    bearCount,
+    mixedCount,
+    marketWideCount,
+    weightedBull,
+    weightedBear,
+    headlineCount: titles.length,
+  };
+}
+
 /**
  * Classify an economic-calendar print for typical equity-market reaction.
  * Higher CPI / hawkish rates → BEAR; stronger growth/jobs vs forecast → BULL.

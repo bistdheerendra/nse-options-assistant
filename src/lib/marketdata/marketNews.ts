@@ -2,12 +2,24 @@
  * Free market news via Google News RSS + Yahoo Finance RSS (no API key).
  */
 
+import { withTtlCache } from "./ttlCache";
+
 export type MarketNewsItem = {
   title: string;
   link: string;
   publishedAt: string | null;
   source: string;
 };
+
+export type MarketNewsResult = {
+  items: MarketNewsItem[];
+  source: string;
+  note: string | null;
+};
+
+/** Shared TTL for dashboard + Sentiment lane — avoid double-hitting RSS. */
+export const MARKET_NEWS_TTL_MS = 5 * 60_000;
+export const MARKET_NEWS_CACHE_KEY = "macro:news";
 
 function decodeXml(s: string): string {
   return s
@@ -66,11 +78,7 @@ async function fetchRss(
   }
 }
 
-export async function fetchMarketNews(limit = 12): Promise<{
-  items: MarketNewsItem[];
-  source: string;
-  note: string | null;
-}> {
+export async function fetchMarketNews(limit = 12): Promise<MarketNewsResult> {
   const [google, yahoo] = await Promise.all([
     fetchRss(
       "https://news.google.com/rss/search?q=Nifty%20OR%20RBI%20OR%20Sensex%20OR%20%22India%20markets%22%20when:1d&hl=en-IN&gl=IN&ceid=IN:en",
@@ -97,4 +105,13 @@ export async function fetchMarketNews(limit = 12): Promise<{
     source: "Google News RSS + Yahoo Finance RSS",
     note: merged.length === 0 ? "News feed temporarily unavailable" : null,
   };
+}
+
+/**
+ * Single source of truth for news used by `/api/dashboard/macro` and Sentiment lane.
+ */
+export function getCachedMarketNews(limit = 12): Promise<MarketNewsResult> {
+  return withTtlCache(MARKET_NEWS_CACHE_KEY, MARKET_NEWS_TTL_MS, () =>
+    fetchMarketNews(limit),
+  );
 }
