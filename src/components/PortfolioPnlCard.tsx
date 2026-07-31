@@ -136,30 +136,49 @@ export function PortfolioPnlCard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hidden, setHidden] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let attempt = 0;
+
+    const load = async () => {
+      attempt += 1;
       try {
-        const res = await fetch("/api/paper");
-        if (!res.ok) throw new Error(`Paper API ${res.status}`);
-        const json = (await res.json()) as PaperPayload;
+        const res = await fetch("/api/paper", { cache: "no-store" });
+        const json = (await res.json()) as PaperPayload & {
+          error?: string;
+          uiHint?: string;
+        };
+        if (!res.ok) {
+          throw new Error(json.uiHint ?? json.error ?? `Paper API ${res.status}`);
+        }
         if (!cancelled) {
           setData(json);
           setError(null);
+          setLoading(false);
         }
       } catch (e) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : "Failed to load paper P&L");
+        if (cancelled) return;
+        const msg = e instanceof Error ? e.message : "Failed to load paper P&L";
+        // Retry a few times — DB cold starts often recover quickly
+        if (attempt < 3) {
+          window.setTimeout(() => {
+            if (!cancelled) void load();
+          }, 600 * attempt);
+          return;
         }
-      } finally {
-        if (!cancelled) setLoading(false);
+        setError(msg);
+        setLoading(false);
       }
-    })();
+    };
+
+    setLoading(true);
+    void load();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [retryKey]);
 
   const metrics = useMemo(() => {
     if (!data) return null;
@@ -232,7 +251,16 @@ export function PortfolioPnlCard() {
           </div>
 
           {error && (
-            <p className="text-sm text-binance-bear">{error}</p>
+            <div className="flex flex-wrap items-center gap-2 text-sm text-binance-bear">
+              <span>{error}</span>
+              <button
+                type="button"
+                onClick={() => setRetryKey((k) => k + 1)}
+                className="rounded border border-binance-bear/40 px-2 py-0.5 text-xs text-binance-text hover:bg-binance-elevated"
+              >
+                Retry
+              </button>
+            </div>
           )}
 
           <div className="flex flex-wrap items-baseline gap-2">

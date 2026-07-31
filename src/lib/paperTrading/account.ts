@@ -79,51 +79,105 @@ async function writeFileStore(store: StoreFile): Promise<void> {
   await fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
 }
 
+function mapDbAccount(
+  acc: {
+    id: string;
+    name: string;
+    cashBalance: number;
+    startingCash: number;
+    createdAt: Date;
+    updatedAt: Date;
+    positions: Array<{
+      id: string;
+      accountId: string;
+      underlying: string;
+      strike: number;
+      optionType: OptionSide;
+      expiry: Date;
+      action: TradeAction;
+      lotSize: number;
+      lots: number;
+      entryPremium: number;
+      status: "OPEN" | "CLOSED" | "EXPIRED";
+      exitPremium: number | null;
+      realizedPnl: number | null;
+      mode: "SCALP" | "SWING";
+      symbolToken: string | null;
+      tradingSymbol: string | null;
+      openedAt: Date;
+      closedAt: Date | null;
+      entrySnapshot: unknown;
+    }>;
+  },
+): PaperAccount {
+  return {
+    id: acc.id,
+    name: acc.name,
+    cashBalance: acc.cashBalance,
+    startingCash: acc.startingCash,
+    createdAt: acc.createdAt.toISOString(),
+    updatedAt: acc.updatedAt.toISOString(),
+    positions: acc.positions.map((p) => ({
+      id: p.id,
+      accountId: p.accountId,
+      underlying: p.underlying,
+      strike: p.strike,
+      optionType: p.optionType,
+      expiry: p.expiry.toISOString().slice(0, 10),
+      action: p.action,
+      lotSize: p.lotSize,
+      lots: p.lots,
+      entryPremium: p.entryPremium,
+      status: p.status,
+      exitPremium: p.exitPremium,
+      realizedPnl: p.realizedPnl,
+      mode: p.mode,
+      symbolToken: p.symbolToken,
+      tradingSymbol: p.tradingSymbol,
+      openedAt: p.openedAt.toISOString(),
+      closedAt: p.closedAt?.toISOString() ?? null,
+      entrySnapshot: p.entrySnapshot,
+    })),
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function getOrCreateAccount(): Promise<PaperAccount> {
   if (hasDatabase() && prisma) {
-    let acc = await prisma.paperOptionsAccount.findFirst({
-      include: { positions: true },
-      orderBy: { createdAt: "asc" },
-    });
-    if (!acc) {
-      acc = await prisma.paperOptionsAccount.create({
-        data: {
-          name: "Default Paper Account",
-          cashBalance: startingCash(),
-          startingCash: startingCash(),
-        },
-        include: { positions: true },
-      });
+    let lastErr: unknown;
+    // Supabase / pooler cold starts often fail the first hit
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let acc = await prisma.paperOptionsAccount.findFirst({
+          include: { positions: true },
+          orderBy: { createdAt: "asc" },
+        });
+        if (!acc) {
+          acc = await prisma.paperOptionsAccount.create({
+            data: {
+              name: "Default Paper Account",
+              cashBalance: startingCash(),
+              startingCash: startingCash(),
+            },
+            include: { positions: true },
+          });
+        }
+        return mapDbAccount(acc);
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          `[paper] DB attempt ${attempt + 1}/3 failed:`,
+          err instanceof Error ? err.message : err,
+        );
+        if (attempt < 2) await sleep(250 * (attempt + 1));
+      }
     }
-    return {
-      id: acc.id,
-      name: acc.name,
-      cashBalance: acc.cashBalance,
-      startingCash: acc.startingCash,
-      createdAt: acc.createdAt.toISOString(),
-      updatedAt: acc.updatedAt.toISOString(),
-      positions: acc.positions.map((p) => ({
-        id: p.id,
-        accountId: p.accountId,
-        underlying: p.underlying,
-        strike: p.strike,
-        optionType: p.optionType,
-        expiry: p.expiry.toISOString().slice(0, 10),
-        action: p.action,
-        lotSize: p.lotSize,
-        lots: p.lots,
-        entryPremium: p.entryPremium,
-        status: p.status,
-        exitPremium: p.exitPremium,
-        realizedPnl: p.realizedPnl,
-        mode: p.mode,
-        symbolToken: p.symbolToken,
-        tradingSymbol: p.tradingSymbol,
-        openedAt: p.openedAt.toISOString(),
-        closedAt: p.closedAt?.toISOString() ?? null,
-        entrySnapshot: p.entrySnapshot,
-      })),
-    };
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error("Paper database unavailable");
   }
   return (await readFileStore()).account;
 }
