@@ -139,44 +139,53 @@ export function PortfolioPnlCard() {
   const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
+    const ac = new AbortController();
     let cancelled = false;
-    let attempt = 0;
 
-    const load = async () => {
-      attempt += 1;
-      try {
-        const res = await fetch("/api/paper", { cache: "no-store" });
-        const json = (await res.json()) as PaperPayload & {
-          error?: string;
-          uiHint?: string;
-        };
-        if (!res.ok) {
-          throw new Error(json.uiHint ?? json.error ?? `Paper API ${res.status}`);
-        }
-        if (!cancelled) {
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, ms);
+      });
+
+    (async () => {
+      setLoading(true);
+      let lastMsg = "Failed to load paper P&L";
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        if (cancelled) return;
+        try {
+          const res = await fetch("/api/paper", {
+            cache: "no-store",
+            signal: ac.signal,
+          });
+          const json = (await res.json()) as PaperPayload & {
+            error?: string;
+            uiHint?: string;
+          };
+          if (!res.ok) {
+            throw new Error(
+              json.uiHint ?? json.error ?? `Paper API ${res.status}`,
+            );
+          }
+          if (cancelled) return;
           setData(json);
           setError(null);
           setLoading(false);
-        }
-      } catch (e) {
-        if (cancelled) return;
-        const msg = e instanceof Error ? e.message : "Failed to load paper P&L";
-        // Retry a few times — DB cold starts often recover quickly
-        if (attempt < 3) {
-          window.setTimeout(() => {
-            if (!cancelled) void load();
-          }, 600 * attempt);
           return;
+        } catch (e) {
+          if (cancelled || ac.signal.aborted) return;
+          lastMsg = e instanceof Error ? e.message : lastMsg;
+          if (attempt < 5) await sleep(700 * attempt);
         }
-        setError(msg);
+      }
+      if (!cancelled) {
+        setError(lastMsg);
         setLoading(false);
       }
-    };
+    })();
 
-    setLoading(true);
-    void load();
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [retryKey]);
 

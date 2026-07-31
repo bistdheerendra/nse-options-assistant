@@ -46,6 +46,9 @@ type StoreFile = { account: PaperAccount };
 const DATA_DIR = path.join(process.cwd(), ".data");
 const STORE_PATH = path.join(DATA_DIR, "paper-account.json");
 
+/** Last successful DB read — survives brief pooler blips within the same process. */
+let memoryCache: PaperAccount | null = null;
+
 function startingCash(): number {
   return Number(process.env.PAPER_STARTING_CASH ?? 100_000);
 }
@@ -145,11 +148,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function mirrorToFile(account: PaperAccount): Promise<void> {
+  try {
+    await writeFileStore({ account });
+  } catch {
+    // non-fatal — mirror is best-effort
+  }
+}
+
+/**
+ * Load paper account. Prefers Postgres; on DB blips falls back to in-memory /
+ * file mirror so the dashboard P&L card never hard-fails after a good read.
+ */
 export async function getOrCreateAccount(): Promise<PaperAccount> {
   if (hasDatabase() && prisma) {
     let lastErr: unknown;
-    // Supabase / pooler cold starts often fail the first hit
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
         let acc = await prisma.paperOptionsAccount.findFirst({
           include: { positions: true },
@@ -165,16 +179,40 @@ export async function getOrCreateAccount(): Promise<PaperAccount> {
             include: { positions: true },
           });
         }
-        return mapDbAccount(acc);
+        const mapped = mapDbAccount(acc);
+        memoryCache = mapped;
+        void mirrorToFile(mapped);
+        return mapped;
       } catch (err) {
         lastErr = err;
         console.warn(
-          `[paper] DB attempt ${attempt + 1}/3 failed:`,
+          `[paper] DB attempt ${attempt + 1}/2 failed:`,
           err instanceof Error ? err.message : err,
         );
-        if (attempt < 2) await sleep(250 * (attempt + 1));
+        if (attempt < 1) await sleep(400);
       }
     }
+
+    if (memoryCache) {
+      console.warn("[paper] serving in-memory cache after DB failure");
+      return memoryCache;
+    }
+
+    try {
+      const file = await readFileStore();
+      // Prefer mirrored snapshot over throwing (empty default still better than 503)
+      if (
+        file.account.id !== "paper_default" ||
+        file.account.positions.length > 0
+      ) {
+        memoryCache = file.account;
+        console.warn("[paper] serving file mirror after DB failure");
+        return file.account;
+      }
+    } catch {
+      // fall through
+    }
+
     throw lastErr instanceof Error
       ? lastErr
       : new Error("Paper database unavailable");
