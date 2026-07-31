@@ -7,10 +7,10 @@ const LINKS = [
   { href: "/backtest", label: "Track Record" },
 ] as const;
 
-/** Server component: static labels come from SSR so HMR can't desync text. */
+/** Desktop / tablet top nav. Mobile uses MobileBottomNav instead. */
 export function NavLinks() {
   return (
-    <nav className="flex flex-wrap gap-4 text-sm">
+    <nav className="hidden flex-wrap gap-4 text-sm md:flex" aria-label="Primary">
       {LINKS.map(({ href, label }) => (
         <NavLink key={href} href={href} label={label} />
       ))}

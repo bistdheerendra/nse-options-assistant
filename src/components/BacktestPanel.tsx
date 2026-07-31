@@ -51,10 +51,14 @@ export function BacktestPanel() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-5 sm:space-y-8">
       <section>
-        <h1 className="text-2xl font-semibold text-binance-gold">Track Record</h1>
-        <p className="mt-2 text-sm text-binance-muted">{data.methodology}</p>
+        <h1 className="text-xl font-semibold text-binance-gold sm:text-2xl">
+          Track Record
+        </h1>
+        <p className="mt-2 text-xs text-binance-muted sm:text-sm">
+          {data.methodology}
+        </p>
         <p className="mt-2 inline-block rounded bg-binance-elevated px-2 py-1 text-xs text-binance-gold">
           Experimental / unvalidated · current={data.currentVersion} · min n=
           {data.minSampleForEdge} for reportable edge

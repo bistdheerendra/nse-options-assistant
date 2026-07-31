@@ -268,7 +268,7 @@ function BuyOrderPanel({
 
 export function PaperTradingPanel() {
   const [underlying, setUnderlying] = useState("NIFTY");
-  const [mode, setMode] = useState<"SCALP" | "SWING">("SWING");
+  const [mode, setMode] = useState<"SCALP" | "SWING">("SCALP");
   const [account, setAccount] = useState<Account | null>(null);
   const [summary, setSummary] = useState<{
     cashBalance: number;
@@ -497,10 +497,12 @@ export function PaperTradingPanel() {
   const formDisabled = !selected;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <section>
-        <h1 className="text-2xl font-semibold text-binance-gold">Paper Trading</h1>
-        <p className="mt-1 text-sm text-binance-muted">
+        <h1 className="text-xl font-semibold text-binance-gold sm:text-2xl">
+          Paper Trading
+        </h1>
+        <p className="mt-1 text-xs text-binance-muted sm:text-sm">
           Simulated options only — this path never calls Angel One order APIs.
         </p>
       </section>

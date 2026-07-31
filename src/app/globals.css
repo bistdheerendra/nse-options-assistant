@@ -12,6 +12,8 @@
   --binance-muted: #848e9c;
   --binance-text: #ffffff;
   --binance-border: #2b3139;
+  /* Bottom tab bar (~56px) + home-indicator safe area on phones */
+  --app-tab-bar: 3.75rem;
 }
 
 @theme inline {
@@ -30,10 +32,30 @@
   --font-mono: var(--font-geist-mono);
 }
 
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
 body {
   background: var(--binance-bg);
   color: var(--binance-text);
   font-family: var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  overscroll-behavior-y: none;
+  min-height: 100dvh;
+}
+
+/* Clearance for fixed bottom tabs on mobile; desktop unchanged */
+.app-main {
+  padding-bottom: calc(
+    1rem + var(--app-tab-bar) + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+@media (min-width: 768px) {
+  .app-main {
+    padding-bottom: 1.5rem;
+  }
 }
 
 * {
@@ -64,4 +86,13 @@ body {
 
 *::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+@media (max-width: 767px) {
+  * {
+    scrollbar-width: none;
+  }
+  *::-webkit-scrollbar {
+    display: none;
+  }
 }

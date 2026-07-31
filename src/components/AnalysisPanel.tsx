@@ -1,6 +1,8 @@
 "use client";
 
+import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
 import { ModeToggle } from "@/components/ModeToggle";
+import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -8,7 +10,7 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 type Underlying = "NIFTY" | "BANKNIFTY" | "SENSEX";
@@ -98,7 +100,7 @@ export function AnalysisPanel() {
   const [underlying, setUnderlying] = useState<Underlying>(() =>
     parseUnderlying(searchParams.get("underlying")),
   );
-  const [mode, setMode] = useState<"SCALP" | "SWING">("SWING");
+  const [mode, setMode] = useState<"SCALP" | "SWING">("SCALP");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<SynthesisPayload | null>(null);
@@ -106,6 +108,12 @@ export function AnalysisPanel() {
   const [marking, setMarking] = useState(false);
   const [markMsg, setMarkMsg] = useState<string | null>(null);
   const [markOk, setMarkOk] = useState(false);
+
+  const { cards, live } = useDashboardLiveStream();
+  const liveLtp = useMemo(() => {
+    const card = cards.find((c) => c.id === underlying);
+    return card && Number.isFinite(card.ltp) ? card.ltp : null;
+  }, [cards, underlying]);
 
   const run = useCallback(async () => {
     setLoading(true);
@@ -184,34 +192,45 @@ export function AnalysisPanel() {
     data?.structure.action !== "NONE" &&
     (!data?.structure.isSellWrite || ackSell);
 
+  const chartLevels = data
+    ? {
+        entry: data.tradePlan.entry,
+        stopLoss: data.tradePlan.stopLoss,
+        takeProfit1: data.tradePlan.takeProfit1,
+        takeProfit2: data.tradePlan.takeProfit2,
+      }
+    : null;
+
   return (
-    <div className="space-y-6">
-      <section className="space-y-3">
-        <h1 className="text-2xl font-semibold tracking-tight text-binance-gold">
+    <div className="space-y-4 sm:space-y-6">
+      <section className="space-y-2 sm:space-y-3">
+        <h1 className="text-xl font-semibold tracking-tight text-binance-gold sm:text-2xl">
           Analysis
         </h1>
-        <p className="max-w-2xl text-sm text-binance-muted">
+        <p className="max-w-2xl text-xs text-binance-muted sm:text-sm">
           Lanes → IV-aware structure → ATR trade plan. Heuristic only — not a
           validated edge.
         </p>
       </section>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <select
-          value={underlying}
-          onChange={(e) => setUnderlying(e.target.value as Underlying)}
-          className="rounded border border-binance-border bg-binance-elevated px-3 py-2 text-sm"
-        >
-          <option value="NIFTY">Nifty 50</option>
-          <option value="BANKNIFTY">BANKNIFTY</option>
-          <option value="SENSEX">SENSEX</option>
-        </select>
-        <ModeToggle mode={mode} onChange={setMode} />
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <select
+            value={underlying}
+            onChange={(e) => setUnderlying(e.target.value as Underlying)}
+            className="min-w-0 flex-1 rounded border border-binance-border bg-binance-elevated px-3 py-2.5 text-sm sm:flex-none"
+          >
+            <option value="NIFTY">Nifty 50</option>
+            <option value="BANKNIFTY">BANKNIFTY</option>
+            <option value="SENSEX">SENSEX</option>
+          </select>
+          <ModeToggle mode={mode} onChange={setMode} />
+        </div>
         <button
           type="button"
           onClick={run}
           disabled={loading}
-          className="inline-flex items-center gap-2 rounded bg-binance-gold px-4 py-2 text-sm font-semibold text-binance-bg disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center gap-2 rounded bg-binance-gold px-4 py-2.5 text-sm font-semibold text-binance-bg disabled:opacity-60 sm:w-auto"
         >
           {loading ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -235,159 +254,171 @@ export function AnalysisPanel() {
           animate={{ opacity: 1, y: 0 }}
           className="space-y-4"
         >
-          {/* Synthesized verdict card */}
-          <div className="overflow-hidden rounded-lg border border-binance-border bg-binance-surface">
-            <div className="flex flex-wrap items-center gap-2 border-b border-binance-border px-4 py-3">
-              <p className="text-xs font-semibold uppercase tracking-wider text-binance-muted">
-                Synthesized verdict
-              </p>
-              <span className="text-sm font-medium text-binance-text">
-                {data.underlying}
-              </span>
-              <span className="text-xs text-binance-muted">
-                {data.tradePlan.timeframeLabel}
-              </span>
-              <span
-                className={`rounded border px-2 py-0.5 text-xs font-bold ${sideColor}`}
-              >
-                {side}
-              </span>
-              <span
-                className="rounded border border-binance-border px-2 py-0.5 text-xs text-binance-muted"
-                title={data.experimentalEdge.label}
-              >
-                {data.experimentalEdge.winRatePct != null
-                  ? `Edge: ${data.experimentalEdge.winRatePct}% experimental`
-                  : data.experimentalEdge.insufficientSample
-                    ? "Edge: insufficient post-4-lane sample"
-                    : "Edge: n/a experimental"}
-                {data.experimentalEdge.sampleSize > 0
-                  ? ` (n=${data.experimentalEdge.sampleSize})`
-                  : data.experimentalEdge.legacySampleSize
-                    ? ` (legacy n=${data.experimentalEdge.legacySampleSize} excluded)`
-                    : ""}
-              </span>
-              <span
-                className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
-                  data.regime.regime === "CHOPPY" ||
-                  data.regime.regime === "VOLATILE"
-                    ? "border-binance-gold/50 text-binance-gold"
-                    : "border-binance-border text-binance-muted"
-                }`}
-              >
-                {(data.regime.regime === "CHOPPY" ||
-                  data.regime.regime === "VOLATILE") && (
-                  <AlertTriangle className="h-3 w-3" />
-                )}
-                {data.regime.regime}
-              </span>
-              <span className="ml-auto text-xs text-binance-muted">
-                {data.alignment.label}
-              </span>
-            </div>
-
-            <div className="grid gap-4 px-4 py-4 sm:grid-cols-2 lg:grid-cols-4">
-              <Level
-                label="Entry (spot)"
-                value={fmt(data.tradePlan.entry)}
-                tone="bull"
-              />
-              <Level
-                label="Stop loss"
-                value={fmt(data.tradePlan.stopLoss)}
-                tone="bear"
-              />
-              <Level
-                label="TP 1"
-                value={fmt(data.tradePlan.takeProfit1)}
-                tone="bull"
-              />
-              <Level
-                label="TP 2"
-                value={fmt(data.tradePlan.takeProfit2)}
-                tone="bull"
-              />
-            </div>
-
-            <div className="space-y-3 border-t border-binance-border px-4 py-4">
-              <div className="flex flex-wrap items-baseline gap-3">
-                <p className="text-sm text-binance-muted">
-                  Risk:Reward{" "}
-                  <span className="font-semibold text-binance-text">
-                    {data.tradePlan.riskReward != null
-                      ? `1:${data.tradePlan.riskReward.toFixed(1)}`
-                      : "—"}
-                  </span>
+          {/* 50% verdict · 50% live chart */}
+          <div className="grid gap-4 lg:grid-cols-2 lg:items-stretch">
+            <div className="overflow-hidden rounded-lg border border-binance-border bg-binance-surface">
+              <div className="flex flex-wrap items-center gap-2 border-b border-binance-border px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-binance-muted">
+                  Synthesized verdict
                 </p>
-                <p className="text-sm font-medium text-binance-gold">
-                  {data.structure.branch.replaceAll("_", " ")}
-                  {data.tradePlan.suggestedContract
-                    ? ` · ${fmt(data.tradePlan.suggestedContract.strike, 0)} ${data.tradePlan.suggestedContract.optionType} @ ₹${fmt(data.tradePlan.suggestedContract.entryPremium)}`
-                    : ""}
-                </p>
-              </div>
-              <p className="text-sm text-binance-muted">{data.tradePlan.summary}</p>
-              {data.structure.isSellWrite && data.structure.riskWarning && (
-                <p className="flex gap-2 text-sm text-binance-bear">
-                  <AlertTriangle className="h-4 w-4 shrink-0" />
-                  {data.structure.riskWarning}
-                </p>
-              )}
-              {!data.structure.isSellWrite && data.structure.riskWarning && (
-                <p className="text-sm text-binance-muted">
-                  {data.structure.riskWarning}
-                </p>
-              )}
-              {data.tradePlan.suggestedContract?.premiumStopHint != null && (
-                <p className="text-xs text-binance-muted">
-                  Premium soft-stop hint ≈ ₹
-                  {fmt(data.tradePlan.suggestedContract.premiumStopHint)}{" "}
-                  (−40% of entry premium on buys).
-                </p>
-              )}
-
-              {data.structure.isSellWrite && (
-                <label className="flex items-start gap-2 text-xs text-binance-muted">
-                  <input
-                    type="checkbox"
-                    checked={ackSell}
-                    onChange={(e) => setAckSell(e.target.checked)}
-                    className="mt-0.5"
-                  />
-                  I acknowledge sell/write risk is uncapped or large (paper
-                  only).
-                </label>
-              )}
-
-              <button
-                type="button"
-                disabled={!canMark || marking}
-                onClick={markAsTaken}
-                className="rounded bg-binance-elevated px-4 py-2 text-sm font-semibold text-binance-text ring-1 ring-binance-border hover:ring-binance-gold disabled:opacity-50"
-              >
-                {marking ? (
-                  <span className="inline-flex items-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Opening…
-                  </span>
-                ) : (
-                  "Mark as taken"
-                )}
-              </button>
-              {markMsg && (
-                <p
-                  className={`flex items-start gap-2 text-sm ${
-                    markOk ? "text-binance-bull" : "text-binance-bear"
+                <span className="text-sm font-medium text-binance-text">
+                  {data.underlying}
+                </span>
+                <span className="text-xs text-binance-muted">
+                  {data.tradePlan.timeframeLabel}
+                </span>
+                <span
+                  className={`rounded border px-2 py-0.5 text-xs font-bold ${sideColor}`}
+                >
+                  {side}
+                </span>
+                <span
+                  className="rounded border border-binance-border px-2 py-0.5 text-xs text-binance-muted"
+                  title={data.experimentalEdge.label}
+                >
+                  {data.experimentalEdge.winRatePct != null
+                    ? `Edge: ${data.experimentalEdge.winRatePct}% experimental`
+                    : data.experimentalEdge.insufficientSample
+                      ? "Edge: insufficient post-4-lane sample"
+                      : "Edge: n/a experimental"}
+                  {data.experimentalEdge.sampleSize > 0
+                    ? ` (n=${data.experimentalEdge.sampleSize})`
+                    : data.experimentalEdge.legacySampleSize
+                      ? ` (legacy n=${data.experimentalEdge.legacySampleSize} excluded)`
+                      : ""}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
+                    data.regime.regime === "CHOPPY" ||
+                    data.regime.regime === "VOLATILE"
+                      ? "border-binance-gold/50 text-binance-gold"
+                      : "border-binance-border text-binance-muted"
                   }`}
                 >
-                  {markOk ? (
-                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-                  ) : (
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  {(data.regime.regime === "CHOPPY" ||
+                    data.regime.regime === "VOLATILE") && (
+                    <AlertTriangle className="h-3 w-3" />
                   )}
-                  {markMsg}
+                  {data.regime.regime}
+                </span>
+                <span className="ml-auto text-xs text-binance-muted">
+                  {data.alignment.label}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 px-3 py-3 sm:gap-4 sm:px-4 sm:py-4 lg:grid-cols-4">
+                <Level
+                  label="Entry (spot)"
+                  value={fmt(data.tradePlan.entry)}
+                  tone="bull"
+                />
+                <Level
+                  label="Stop loss"
+                  value={fmt(data.tradePlan.stopLoss)}
+                  tone="bear"
+                />
+                <Level
+                  label="TP 1"
+                  value={fmt(data.tradePlan.takeProfit1)}
+                  tone="bull"
+                />
+                <Level
+                  label="TP 2"
+                  value={fmt(data.tradePlan.takeProfit2)}
+                  tone="bull"
+                />
+              </div>
+
+              <div className="space-y-3 border-t border-binance-border px-4 py-4">
+                <div className="flex flex-wrap items-baseline gap-3">
+                  <p className="text-sm text-binance-muted">
+                    Risk:Reward{" "}
+                    <span className="font-semibold text-binance-text">
+                      {data.tradePlan.riskReward != null
+                        ? `1:${data.tradePlan.riskReward.toFixed(1)}`
+                        : "—"}
+                    </span>
+                  </p>
+                  <p className="text-sm font-medium text-binance-gold">
+                    {data.structure.branch.replaceAll("_", " ")}
+                    {data.tradePlan.suggestedContract
+                      ? ` · ${fmt(data.tradePlan.suggestedContract.strike, 0)} ${data.tradePlan.suggestedContract.optionType} @ ₹${fmt(data.tradePlan.suggestedContract.entryPremium)}`
+                      : ""}
+                  </p>
+                </div>
+                <p className="text-sm text-binance-muted">
+                  {data.tradePlan.summary}
                 </p>
-              )}
+                {data.structure.isSellWrite && data.structure.riskWarning && (
+                  <p className="flex gap-2 text-sm text-binance-bear">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    {data.structure.riskWarning}
+                  </p>
+                )}
+                {!data.structure.isSellWrite && data.structure.riskWarning && (
+                  <p className="text-sm text-binance-muted">
+                    {data.structure.riskWarning}
+                  </p>
+                )}
+                {data.tradePlan.suggestedContract?.premiumStopHint != null && (
+                  <p className="text-xs text-binance-muted">
+                    Premium soft-stop hint ≈ ₹
+                    {fmt(data.tradePlan.suggestedContract.premiumStopHint)}{" "}
+                    (−40% of entry premium on buys).
+                  </p>
+                )}
+
+                {data.structure.isSellWrite && (
+                  <label className="flex items-start gap-2 text-xs text-binance-muted">
+                    <input
+                      type="checkbox"
+                      checked={ackSell}
+                      onChange={(e) => setAckSell(e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    I acknowledge sell/write risk is uncapped or large (paper
+                    only).
+                  </label>
+                )}
+
+                <button
+                  type="button"
+                  disabled={!canMark || marking}
+                  onClick={markAsTaken}
+                  className="rounded bg-binance-elevated px-4 py-2 text-sm font-semibold text-binance-text ring-1 ring-binance-border hover:ring-binance-gold disabled:opacity-50"
+                >
+                  {marking ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Opening…
+                    </span>
+                  ) : (
+                    "Mark as taken"
+                  )}
+                </button>
+                {markMsg && (
+                  <p
+                    className={`flex items-start gap-2 text-sm ${
+                      markOk ? "text-binance-bull" : "text-binance-bear"
+                    }`}
+                  >
+                    {markOk ? (
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    )}
+                    {markMsg}
+                  </p>
+                )}
+              </div>
             </div>
+
+            <AnalysisLiveChart
+              underlying={underlying}
+              mode={mode}
+              liveLtp={liveLtp}
+              live={live}
+              levels={chartLevels}
+            />
           </div>
 
           {(data.scalpLiquidityWarning || data.swingThetaWarning) && (
@@ -402,7 +433,7 @@ export function AnalysisPanel() {
                 <div className="flex items-baseline justify-between gap-2">
                   <p className="text-sm font-medium capitalize">
                     {name}
-                    {(name === "macro" || name === "sentiment") ? (
+                    {name === "macro" || name === "sentiment" ? (
                       <span className="ml-1.5 text-[10px] font-normal uppercase tracking-wide text-binance-muted">
                         heuristic
                       </span>
@@ -459,7 +490,7 @@ function Level({
         {label}
       </p>
       <p
-        className={`mt-1 text-lg font-semibold tabular-nums ${
+        className={`mt-1 text-base font-semibold tabular-nums sm:text-lg ${
           tone === "bull" ? "text-binance-bull" : "text-binance-bear"
         }`}
       >

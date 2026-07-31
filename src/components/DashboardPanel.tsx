@@ -14,24 +14,31 @@ export function DashboardPanel() {
   const ago = useRelativeClock(fetchedAt);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <PortfolioPnlCard />
 
       <section className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2.5">
-            <h1 className="text-2xl font-semibold tracking-tight text-binance-gold">
+            <h1 className="text-xl font-semibold tracking-tight text-binance-gold sm:text-2xl">
               Markets
             </h1>
             <LiveBadge active={live && !loading} />
           </div>
-          <p className="mt-1 text-sm text-binance-muted">
-            Server SSE push · spot tick ~0.3s (NSE + Gift) · candles refresh
-            ~30s
-            {demoMode
-              ? " · DEMO mode — public feeds (not Angel tick WebSocket)"
-              : ""}
-            {ago ? ` · ${ago}` : ""}
+          <p className="mt-1 text-xs text-binance-muted sm:text-sm">
+            <span className="md:hidden">
+              Live spot ~0.3s
+              {demoMode ? " · DEMO" : ""}
+              {ago ? ` · ${ago}` : ""}
+            </span>
+            <span className="hidden md:inline">
+              Server SSE push · spot tick ~0.3s (NSE + Gift) · candles refresh
+              ~30s
+              {demoMode
+                ? " · DEMO mode — public feeds (not Angel tick WebSocket)"
+                : ""}
+              {ago ? ` · ${ago}` : ""}
+            </span>
           </p>
         </div>
         {!live && (
@@ -64,7 +71,7 @@ export function DashboardPanel() {
           Connecting to live feed…
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-4">
           {cards.map((card: IndexCardData) => (
             <IndexQuoteCard key={card.id} card={card} live={live} />
           ))}

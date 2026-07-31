@@ -1,4 +1,5 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
+import { MobileBottomNav } from "@/components/MobileBottomNav";
 import { NavLinks } from "@/components/NavLinks";
 import { Geist_Mono, IBM_Plex_Sans } from "next/font/google";
 import Link from "next/link";
@@ -18,7 +19,23 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "NSE Options Assistant",
-  description: "Rules-based NSE index options analysis + paper trading (not financial advice)",
+  description:
+    "Rules-based NSE index options analysis + paper trading (not financial advice)",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "NSE Options",
+  },
+  formatDetection: {
+    telephone: false,
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0B0E11",
 };
 
 export default function RootLayout({
@@ -31,21 +48,32 @@ export default function RootLayout({
       lang="en"
       className={`${ibmPlexSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-binance-bg font-sans text-binance-text">
-        <header className="border-b border-binance-border bg-binance-surface">
-          <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
-            <Link href="/" className="text-lg font-semibold tracking-tight text-binance-gold">
-              NSE Options Assistant
+      <body className="flex min-h-full flex-col bg-binance-bg font-sans text-binance-text">
+        <header
+          className="sticky top-0 z-40 border-b border-binance-border bg-binance-surface/95 backdrop-blur-md"
+          style={{ paddingTop: "env(safe-area-inset-top, 0px)" }}
+        >
+          <div className="mx-auto flex w-full max-w-[1600px] items-center justify-between gap-3 px-3 py-2.5 sm:px-6 sm:py-3 lg:px-8">
+            <Link
+              href="/"
+              className="min-w-0 truncate text-base font-semibold tracking-tight text-binance-gold sm:text-lg"
+            >
+              <span className="md:hidden">NSE Options</span>
+              <span className="hidden md:inline">NSE Options Assistant</span>
             </Link>
             <NavLinks />
           </div>
         </header>
-        <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 sm:px-6 lg:px-8">
+
+        <main className="app-main mx-auto w-full max-w-[1600px] flex-1 px-3 py-4 sm:px-6 sm:py-6 lg:px-8">
           {children}
         </main>
-        <footer className="border-t border-binance-border py-4 text-center text-xs text-binance-muted">
+
+        <footer className="hidden border-t border-binance-border py-4 text-center text-xs text-binance-muted md:block">
           Paper trading only · Rules-based heuristics · Not investment advice
         </footer>
+
+        <MobileBottomNav />
       </body>
     </html>
   );

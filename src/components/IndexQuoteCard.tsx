@@ -61,7 +61,7 @@ export function IndexQuoteCard({
         : theme.colors.text;
 
   return (
-    <article className="flex flex-col rounded-xl border border-binance-border bg-binance-surface p-4">
+    <article className="flex flex-col rounded-xl border border-binance-border bg-binance-surface p-3 sm:p-4">
       <div className="mb-3 flex items-start justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium" style={{ color: theme.colors.text }}>

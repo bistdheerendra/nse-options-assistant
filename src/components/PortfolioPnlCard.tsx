@@ -207,7 +207,7 @@ export function PortfolioPnlCard() {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.35, ease: "easeOut" }}
-      className="rounded-2xl border border-binance-border bg-binance-elevated p-5 sm:p-6"
+      className="rounded-xl border border-binance-border bg-binance-elevated p-4 sm:rounded-2xl sm:p-6"
     >
       <div className="flex flex-col gap-6 lg:flex-row lg:items-stretch lg:justify-between">
         {/* Left — balance + P&L */}
@@ -236,7 +236,7 @@ export function PortfolioPnlCard() {
           )}
 
           <div className="flex flex-wrap items-baseline gap-2">
-            <span className="text-3xl font-semibold tracking-tight tabular-nums text-binance-text sm:text-4xl">
+            <span className="text-[1.75rem] font-semibold tracking-tight tabular-nums text-binance-text sm:text-4xl">
               {metrics
                 ? mask(formatInr(metrics.totalValue))
                 : loading
@@ -305,24 +305,24 @@ export function PortfolioPnlCard() {
 
         {/* Right — actions + sparkline */}
         <div className="flex min-w-0 flex-col items-stretch gap-4 lg:w-[min(100%,360px)] lg:items-end">
-          <div className="flex flex-wrap gap-2 lg:justify-end">
+          <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap lg:justify-end">
             <Link
               href="/paper"
-              className="rounded-lg bg-binance-surface px-3.5 py-2 text-sm font-medium text-binance-text transition hover:bg-binance-border/60"
+              className="rounded-lg bg-binance-surface px-2 py-2.5 text-center text-xs font-medium text-binance-text transition hover:bg-binance-border/60 sm:px-3.5 sm:py-2 sm:text-sm"
             >
-              Paper Trade
+              Paper
             </Link>
             <Link
               href="/analysis"
-              className="rounded-lg bg-binance-surface px-3.5 py-2 text-sm font-medium text-binance-text transition hover:bg-binance-border/60"
+              className="rounded-lg bg-binance-surface px-2 py-2.5 text-center text-xs font-medium text-binance-text transition hover:bg-binance-border/60 sm:px-3.5 sm:py-2 sm:text-sm"
             >
               Analysis
             </Link>
             <Link
               href="/backtest"
-              className="rounded-lg bg-binance-surface px-3.5 py-2 text-sm font-medium text-binance-text transition hover:bg-binance-border/60"
+              className="rounded-lg bg-binance-surface px-2 py-2.5 text-center text-xs font-medium text-binance-text transition hover:bg-binance-border/60 sm:px-3.5 sm:py-2 sm:text-sm"
             >
-              Track Record
+              Record
             </Link>
           </div>
 
