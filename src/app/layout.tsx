@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { MobileBottomNav } from "@/components/MobileBottomNav";
 import { NavLinks } from "@/components/NavLinks";
-import { Geist_Mono, IBM_Plex_Sans } from "next/font/google";
+import { Geist_Mono, IBM_Plex_Sans, JetBrains_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
 
@@ -14,6 +14,11 @@ const ibmPlexSans = IBM_Plex_Sans({
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains",
   subsets: ["latin"],
 });
 
@@ -46,7 +51,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${ibmPlexSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${ibmPlexSans.variable} ${geistMono.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-binance-bg font-sans text-binance-text">
         <header

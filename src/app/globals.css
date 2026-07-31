@@ -45,6 +45,10 @@ body {
   min-height: 100dvh;
 }
 
+.font-jetbrains {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+}
+
 /* Clearance for fixed bottom tabs on mobile; desktop unchanged */
 .app-main {
   padding-bottom: calc(

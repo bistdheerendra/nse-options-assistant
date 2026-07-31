@@ -453,7 +453,7 @@ export function AnalysisPanel() {
                     {lane.score.toFixed(2)}
                   </p>
                 </div>
-                <ul className="mt-2 space-y-1 text-xs text-binance-muted">
+                <ul className="mt-2 space-y-1 font-jetbrains text-xs text-binance-muted">
                   {lane.signals
                     .slice(0, name === "macro" || name === "sentiment" ? 6 : 4)
                     .map((s) => (
