@@ -27,6 +27,7 @@ type MacroQuote = {
   id: string;
   label: string;
   group: string;
+  country: string | null;
   price: number;
   change: number;
   changePct: number;
@@ -157,11 +158,15 @@ function QuoteTile({ q }: { q: MacroQuote }) {
     <div className="rounded-lg border border-binance-border bg-binance-elevated px-3 py-2.5">
       <div className="flex items-start justify-between gap-2">
         <p className="text-xs text-binance-muted">{q.label}</p>
-        {q.note && (
+        {q.country ? (
+          <span className="shrink-0 text-[10px] text-binance-muted">
+            {q.country}
+          </span>
+        ) : q.note ? (
           <span className="text-[9px] uppercase tracking-wide text-binance-muted">
             Proxy
           </span>
-        )}
+        ) : null}
       </div>
       <p className="mt-1 text-lg font-semibold tabular-nums text-binance-text">
         {formatPrice(q.price, q.currency)}

@@ -6,6 +6,7 @@ export type MacroQuote = {
   id: string;
   label: string;
   group: "gift" | "vix" | "us" | "asia" | "commodities" | "fx";
+  country: string | null;
   price: number;
   change: number;
   changePct: number;
@@ -23,24 +24,25 @@ type Spec = {
   label: string;
   group: MacroQuote["group"];
   yahoo: string;
+  country?: string;
   note?: string;
 };
 
 const SPECS: Spec[] = [
-  { id: "INDIAVIX", label: "India VIX", group: "vix", yahoo: "^INDIAVIX" },
-  { id: "VIX", label: "US VIX", group: "vix", yahoo: "^VIX" },
-  { id: "DJI", label: "Dow Jones", group: "us", yahoo: "^DJI" },
-  { id: "IXIC", label: "Nasdaq", group: "us", yahoo: "^IXIC" },
-  { id: "GSPC", label: "S&P 500", group: "us", yahoo: "^GSPC" },
-  { id: "N225", label: "Nikkei 225", group: "asia", yahoo: "^N225" },
-  { id: "HSI", label: "Hang Seng", group: "asia", yahoo: "^HSI" },
-  { id: "SSEC", label: "Shanghai Comp", group: "asia", yahoo: "000001.SS" },
-  { id: "KS11", label: "KOSPI", group: "asia", yahoo: "^KS11" },
-  { id: "STI", label: "Straits Times", group: "asia", yahoo: "^STI" },
-  { id: "CL", label: "WTI Crude", group: "commodities", yahoo: "CL=F" },
-  { id: "BZ", label: "Brent Crude", group: "commodities", yahoo: "BZ=F" },
-  { id: "DXY", label: "Dollar Index (DXY)", group: "fx", yahoo: "DX-Y.NYB" },
-  { id: "USDINR", label: "USD / INR", group: "fx", yahoo: "INR=X" },
+  { id: "INDIAVIX", label: "India VIX", group: "vix", yahoo: "^INDIAVIX", country: "India" },
+  { id: "VIX", label: "US VIX", group: "vix", yahoo: "^VIX", country: "US" },
+  { id: "DJI", label: "Dow Jones", group: "us", yahoo: "^DJI", country: "US" },
+  { id: "IXIC", label: "Nasdaq", group: "us", yahoo: "^IXIC", country: "US" },
+  { id: "GSPC", label: "S&P 500", group: "us", yahoo: "^GSPC", country: "US" },
+  { id: "N225", label: "Nikkei 225", group: "asia", yahoo: "^N225", country: "Japan" },
+  { id: "HSI", label: "Hang Seng", group: "asia", yahoo: "^HSI", country: "Hong Kong" },
+  { id: "SSEC", label: "Shanghai Comp", group: "asia", yahoo: "000001.SS", country: "China" },
+  { id: "KS11", label: "KOSPI", group: "asia", yahoo: "^KS11", country: "South Korea" },
+  { id: "STI", label: "Straits Times", group: "asia", yahoo: "^STI", country: "Singapore" },
+  { id: "CL", label: "WTI Crude", group: "commodities", yahoo: "CL=F", country: "US" },
+  { id: "BZ", label: "Brent Crude", group: "commodities", yahoo: "BZ=F", country: "Global" },
+  { id: "DXY", label: "Dollar Index (DXY)", group: "fx", yahoo: "DX-Y.NYB", country: "US" },
+  { id: "USDINR", label: "USD / INR", group: "fx", yahoo: "INR=X", country: "India" },
 ];
 
 async function fetchNseIndiaVix(): Promise<MacroQuote | null> {
@@ -81,6 +83,7 @@ async function fetchNseIndiaVix(): Promise<MacroQuote | null> {
       id: "INDIAVIX",
       label: "India VIX",
       group: "vix",
+      country: "India",
       price,
       change,
       changePct,
@@ -113,6 +116,7 @@ export async function fetchMacroMarketQuotes(): Promise<MacroQuote[]> {
       id: "GIFTNIFTY",
       label: "Gift Nifty",
       group: "gift",
+      country: "India",
       price: gift.ltp,
       change: gift.change,
       changePct: gift.changePct,
@@ -127,6 +131,7 @@ export async function fetchMacroMarketQuotes(): Promise<MacroQuote[]> {
         id: "GIFTNIFTY",
         label: "Gift Nifty",
         group: "gift",
+        country: "India",
         price: niftyProxy.price,
         change: niftyProxy.change,
         changePct: niftyProxy.changePct,
@@ -144,6 +149,7 @@ export async function fetchMacroMarketQuotes(): Promise<MacroQuote[]> {
       id: spec.id,
       label: spec.label,
       group: spec.group,
+      country: spec.country ?? null,
       price: y.price,
       change: y.change,
       changePct: y.changePct,

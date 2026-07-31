@@ -25,6 +25,7 @@ function q(
     id,
     label: id,
     group,
+    country: null,
     price,
     change: (changePct / 100) * price,
     changePct,
