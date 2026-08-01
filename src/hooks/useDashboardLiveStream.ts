@@ -8,6 +8,7 @@ type StreamOk = {
   fetchedAt: string;
   cards: IndexCardData[];
   demoMode: boolean;
+  feed?: "angel-ws" | "public-spot" | "snapshot";
 };
 
 type StreamErr = {
@@ -26,6 +27,7 @@ type StreamPayload = StreamOk | StreamErr;
 export function useDashboardLiveStream() {
   const [cards, setCards] = useState<IndexCardData[]>([]);
   const [demoMode, setDemoMode] = useState(false);
+  const [feed, setFeed] = useState<StreamOk["feed"]>(undefined);
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +58,7 @@ export function useDashboardLiveStream() {
         if (payload.ok) {
           setCards(payload.cards);
           setDemoMode(payload.demoMode);
+          setFeed(payload.feed);
           setLive(true);
           setError(null);
           setLoading(false);
@@ -104,6 +107,7 @@ export function useDashboardLiveStream() {
   return {
     cards,
     demoMode,
+    feed,
     loading,
     live,
     error,

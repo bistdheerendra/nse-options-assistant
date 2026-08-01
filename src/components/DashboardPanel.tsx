@@ -9,9 +9,10 @@ import { useRelativeClock } from "@/hooks/useLivePoll";
 import { AlertTriangle, Loader2, Radio } from "lucide-react";
 
 export function DashboardPanel() {
-  const { cards, demoMode, loading, live, error, fetchedAt, reconnect } =
+  const { cards, demoMode, feed, loading, live, error, fetchedAt, reconnect } =
     useDashboardLiveStream();
   const ago = useRelativeClock(fetchedAt);
+  const angelLive = feed === "angel-ws" && !demoMode;
 
   return (
     <div className="space-y-4 sm:space-y-6">
@@ -27,16 +28,19 @@ export function DashboardPanel() {
           </div>
           <p className="mt-1 text-xs text-binance-muted sm:text-sm">
             <span className="md:hidden">
-              Live spot ~0.3s
-              {demoMode ? " · DEMO" : ""}
+              {demoMode
+                ? "DEMO public feed"
+                : angelLive
+                  ? "Angel ticks · Gift ~0.5s"
+                  : "Spot feed · reconnecting Angel"}
               {ago ? ` · ${ago}` : ""}
             </span>
             <span className="hidden md:inline">
-              Server SSE push · spot tick ~0.3s (NSE + Gift) · candles refresh
-              ~30s
               {demoMode
-                ? " · DEMO mode — public feeds (not Angel tick WebSocket)"
-                : ""}
+                ? "DEMO mode — public NSE + Gift (not Angel tick WebSocket)"
+                : angelLive
+                  ? "Angel One WebSocket ticks (Nifty / Bank Nifty / Sensex) · Gift ~0.5s · candles ~30s"
+                  : "Server SSE · waiting for Angel WebSocket (public NSE fallback) · candles ~30s"}
               {ago ? ` · ${ago}` : ""}
             </span>
           </p>
