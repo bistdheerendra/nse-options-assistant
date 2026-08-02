@@ -14,6 +14,10 @@ export const theme = {
     muted: "#848E9C",
     text: "#FFFFFF",
     border: "#2B3139",
+    /** Stage 5 SL-cluster support — blue, distinct from bull candle green */
+    clusterSupport: "#60A5FA",
+    /** Stage 5 SL-cluster resistance — violet, distinct from bear candle red */
+    clusterResistance: "#C084FC",
   },
 } as const;
 
@@ -30,4 +34,6 @@ export const cssVars = {
   muted: "--color-binance-muted",
   text: "--color-binance-text",
   border: "--color-binance-border",
+  clusterSupport: "--color-binance-cluster-support",
+  clusterResistance: "--color-binance-cluster-resistance",
 } as const;

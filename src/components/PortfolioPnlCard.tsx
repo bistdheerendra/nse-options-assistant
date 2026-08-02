@@ -9,8 +9,12 @@ import {
   Loader2,
   ChevronDown,
 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useId, useMemo, useState } from "react";
+
+const PROFILE_NAME = "Dheerendra";
+const PROFILE_IMAGE = "/profile-dheerendra.png";
 
 type Position = {
   status: string;
@@ -238,8 +242,25 @@ export function PortfolioPnlCard() {
       className="rounded-xl border border-binance-border bg-binance-elevated p-4 sm:rounded-2xl sm:p-6"
     >
       <div className="flex flex-col gap-6 lg:flex-row lg:items-stretch lg:justify-between">
-        {/* Left — balance + P&L */}
+        {/* Left — profile + balance + P&L */}
         <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex items-center gap-3">
+            <Image
+              src={PROFILE_IMAGE}
+              alt={PROFILE_NAME}
+              width={40}
+              height={40}
+              className="h-10 w-10 rounded-full object-cover ring-2 ring-binance-gold/40"
+              priority
+            />
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-binance-text">
+                {PROFILE_NAME}
+              </p>
+              <p className="text-xs text-binance-muted">Paper trader</p>
+            </div>
+          </div>
+
           <div className="flex items-center gap-2">
             <p className="text-sm text-binance-muted">Est. Total Value</p>
             <button

@@ -1,9 +1,27 @@
-import { getOptionChain, type Underlying } from "@/lib/marketdata/angelone";
+import { getOptionChain, getUnderlyingCandles, type OhlcvCandle, type Underlying } from "@/lib/marketdata/angelone";
+import {
+  assessScalpLiquidity,
+  type LiquidityAssessment,
+} from "@/lib/marketdata/scalp/liquidity";
+import {
+  computeOiVelocity,
+  type OiVelocityResult,
+} from "@/lib/marketdata/scalp/oiVelocity";
+import {
+  deriveStopLossClusters,
+  type StopLossClusterResult,
+} from "@/lib/marketdata/scalp/stopLossClusters";
+import { getMultiTimeframeCandles } from "@/lib/marketdata/scalp/multiTimeframeCandles";
+import {
+  buildScalpSignalCard,
+  type ScalpSignalCard,
+} from "@/lib/marketdata/scalp/scalpSignal";
 import { runMacroLane } from "@/lib/lanes/macro";
 import { runOptionsFlowLane } from "@/lib/lanes/optionsFlow";
 import { runSentimentLane } from "@/lib/lanes/sentiment";
 import { runTechnicalLane } from "@/lib/lanes/technical";
 import type { TradingMode } from "@/lib/lanes/types";
+import { clampScore } from "@/lib/lanes/types";
 import { hasDatabase, prisma } from "@/lib/prisma";
 import {
   computeTrackRecord,
@@ -41,6 +59,14 @@ export type SynthesisResult = {
   };
   confidenceLabel: string;
   scalpLiquidityWarning: string | null;
+  /** Stage 4 structured liquidity gate (SCALP only; null on SWING). */
+  scalpLiquidity: LiquidityAssessment | null;
+  /** Stage 5 SL-cluster / S-R levels (SCALP only). */
+  stopLossClusters: StopLossClusterResult | null;
+  /** Stage 6 OI velocity (SCALP only). */
+  oiVelocity: OiVelocityResult | null;
+  /** Stage 7–8 scalp signal card (SCALP only). */
+  scalpSignal: ScalpSignalCard | null;
   swingThetaWarning: string | null;
   daysToExpiry: number | null;
   tradeIdeaId: string | null;
@@ -88,8 +114,26 @@ export async function runSynthesis(params: {
   const mode = params.mode ?? "SWING";
   const chain = await getOptionChain(params.underlying, params.expiry);
 
-  const [technical, optionsFlow, sentiment, macro] = await Promise.all([
-    runTechnicalLane({ underlying: params.underlying, mode }),
+  // Scalp uses 5m candles for clusters; swing keeps hour series via technical lane.
+  let scalpCandles: OhlcvCandle[] | undefined;
+  if (mode === "SCALP") {
+    try {
+      scalpCandles = await getUnderlyingCandles(
+        params.underlying,
+        "FIVE_MINUTE",
+        5,
+      );
+    } catch {
+      scalpCandles = undefined;
+    }
+  }
+
+  const [technicalRaw, optionsFlow, sentiment, macro] = await Promise.all([
+    runTechnicalLane({
+      underlying: params.underlying,
+      mode,
+      candles: scalpCandles,
+    }),
     runOptionsFlowLane({
       underlying: params.underlying,
       mode,
@@ -100,11 +144,88 @@ export async function runSynthesis(params: {
     runMacroLane({ underlying: params.underlying, mode }),
   ]);
 
+  let scalpLiquidity: LiquidityAssessment | null = null;
+  let scalpLiquidityWarning: string | null = null;
+  let stopLossClusters: StopLossClusterResult | null = null;
+  let oiVelocity: OiVelocityResult | null = null;
+  let scalpSignal: ScalpSignalCard | null = null;
+
+  let technical = technicalRaw;
+
+  if (mode === "SCALP") {
+    // Pre-structure liquidity gate (ATM CE focus); refined after structure below.
+    scalpLiquidity = assessScalpLiquidity(chain, null);
+    stopLossClusters = deriveStopLossClusters({
+      underlying: params.underlying,
+      spot: chain.spot,
+      candles: scalpCandles ?? [],
+      chain,
+    });
+    oiVelocity = computeOiVelocity(chain);
+
+    try {
+      const mtf = await getMultiTimeframeCandles(params.underlying);
+      scalpSignal = buildScalpSignalCard({
+        underlying: params.underlying,
+        candleBundle: mtf,
+        liquidity: scalpLiquidity,
+        clusters: stopLossClusters,
+        oiVelocity,
+      });
+      // Feed Stage 2–7 lean into existing §2.5 SCALP technical weight (0.35) — not a second scorer.
+      technical = {
+        ...technicalRaw,
+        score: clampScore(
+          technicalRaw.score + scalpSignal.technicalBiasAdj * 0.5,
+        ),
+        signals: [
+          ...technicalRaw.signals,
+          `Scalp PA/volume/OI adj=${scalpSignal.technicalBiasAdj.toFixed(2)} (heuristic)`,
+        ],
+        rawIndicators: {
+          ...technicalRaw.rawIndicators,
+          scalpTechnicalBiasAdj: scalpSignal.technicalBiasAdj,
+          scalpConfirmation: scalpSignal.confirmation.status,
+        },
+      };
+    } catch {
+      // MTF fetch failed — leave scalpSignal null; synthesis still runs on lanes.
+    }
+  }
+
   const directional = synthesizeDirectional(
     { technical, optionsFlow, sentiment, macro },
     mode,
   );
   const structure = synthesizeStructure(directional.verdict, optionsFlow.extras);
+
+  if (mode === "SCALP" && scalpLiquidity) {
+    const preferredSide =
+      structure.optionType === "CE" || structure.optionType === "PE"
+        ? structure.optionType
+        : null;
+    scalpLiquidity = assessScalpLiquidity(chain, preferredSide);
+    scalpLiquidityWarning = scalpLiquidity.warning;
+    if (scalpSignal) {
+      scalpSignal = {
+        ...scalpSignal,
+        liquidityStatus: scalpLiquidity.status,
+        liquidityBadge: scalpLiquidity.badgeLabel,
+        actionable:
+          scalpSignal.confirmation.status === "confirmed" &&
+          scalpLiquidity.status !== "fail" &&
+          scalpSignal.volumeConfirmation !== "disqualify",
+        actionableNote:
+          scalpSignal.confirmation.status === "confirmed" &&
+          scalpLiquidity.status !== "fail" &&
+          scalpSignal.volumeConfirmation !== "disqualify"
+            ? "Rule stack cleared (confirm candle + liquidity + volume) — still a heuristic, not a validated edge."
+            : scalpLiquidity.status === "fail"
+              ? "Not actionable: liquidity fail (unsuitable for scalping)"
+              : scalpSignal.actionableNote,
+      };
+    }
+  }
 
   const atr = num(technical.rawIndicators.atr14);
   const regime = detectRegime({
@@ -149,11 +270,6 @@ export async function runSynthesis(params: {
   const expiryDate = new Date(chain.expiry);
   const dte = daysBetween(new Date(), expiryDate);
 
-  let scalpLiquidityWarning: string | null = null;
-  if (mode === "SCALP" && optionsFlow.extras.lowLiquidityStrikes.length) {
-    scalpLiquidityWarning = `Scalp mode: ${optionsFlow.extras.lowLiquidityStrikes.length} strikes flagged low-liquidity (wide bid-ask / low volume) — unsuitable even if direction looks good.`;
-  }
-
   let swingThetaWarning: string | null = null;
   if (mode === "SWING") {
     if (dte <= 3) {
@@ -192,6 +308,10 @@ export async function runSynthesis(params: {
       macro: { score: macro.score, signals: macro.signals, rawIndicators: macro.rawIndicators },
     },
     warnings: { scalpLiquidityWarning, swingThetaWarning },
+    scalpLiquidity,
+    stopLossClusters,
+    oiVelocity,
+    scalpSignal,
   };
 
   let tradeIdeaId: string | null = null;
@@ -232,6 +352,10 @@ export async function runSynthesis(params: {
     lanes: { technical, optionsFlow, sentiment, macro },
     confidenceLabel,
     scalpLiquidityWarning,
+    scalpLiquidity,
+    stopLossClusters,
+    oiVelocity,
+    scalpSignal,
     swingThetaWarning,
     daysToExpiry: dte,
     tradeIdeaId,

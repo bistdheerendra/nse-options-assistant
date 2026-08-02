@@ -54,7 +54,142 @@ Sell/write recommendations must surface uncapped / large-loss risk explicitly.
 - Swing surfaces days-to-expiry and Theta-vs-directional-gain warnings.
 - Trade plan ATR multiples: Scalp **1.25×ATR**, Swing **2.25×ATR**; TP1/TP2 at 1:2 / 1:3 vs risk.
 - Suggested contract: ATM-ish from live option chain for Mark as taken → paper.
-- **TODO:** Scalp near-real-time polling (seconds) may need Upstash Redis pub/sub — not yet implemented; current path is request-time fetch.
+- **TODO:** Scalp near-real-time polling (seconds) may need Upstash Redis pub/sub — not yet implemented; current path is request-time fetch + periodic `poll:scalp-candles` job.
+
+### 3.1 Scalping Mode — multi-timeframe candle pipeline (Stage 1)
+
+**Purpose:** Feed later price-action / volume / confirmation stages with synchronized 1m · 3m · 5m · 15m OHLCV for NIFTY / BANKNIFTY / SENSEX.
+
+**Angel One intervals (verified SmartAPI Historical docs):**
+`ONE_MINUTE` | `THREE_MINUTE` | `FIVE_MINUTE` | `FIFTEEN_MINUTE`
+Max days / request: 30 / 60 / 100 / 200 respectively. We request shorter windows so responses stay under the practical ~500-bar ceiling:
+
+| Interval | Lookback days used |
+|----------|-------------------:|
+| ONE_MINUTE | 2 |
+| THREE_MINUTE | 5 |
+| FIVE_MINUTE | 5 |
+| FIFTEEN_MINUTE | 10 |
+
+**Data flow**
+1. `getMultiTimeframeCandles(underlying)` fetches the four intervals **sequentially** (Angel `angelThrottle` ~250ms + `SCALP_POLL_GAP_MS` 350ms between TFs).
+2. Best-effort idempotent upsert into Postgres `MarketCandle` (`@@unique([underlying, interval, time])`) when `DATABASE_URL` is set.
+3. In-process TTL (~45s) + optional Upstash Redis key `scalp:mtf:{underlying}` coalesce request-time callers.
+4. Job: `npm run poll:scalp-candles` walks all three underlyings with an extra ~800ms gap — force-refresh, no silent parallel hammering.
+5. API: `GET /api/scalp/candles?underlying=NIFTY` (optional `&interval=ONE_MINUTE`).
+
+**Storage note:** Locked stack is Prisma → Postgres (Supabase). Timescale hypertables are **not** wired; `MarketCandle` is a normal Postgres table suitable for scalp lookbacks. Timescale remains listed under Not Yet for longer IV/candle history.
+
+**Fallback when Angel is rate-limited / down**
+1. Serve last good `MarketCandle` rows (`source: db_cache`) and mark `degraded: true` with reason.
+2. If no DB rows: empty series + degrade reason; UI should show “market data unavailable”.
+3. Demo / missing credentials: labeled `source: "demo"` mocks (never silent stubs).
+
+### 3.1b Scalping Mode — price action + patterns (Stage 2)
+
+**Module:** `src/lib/marketdata/scalp/priceAction.ts` (pure; no verdict).
+
+**Per timeframe** (`ONE_MINUTE` … `FIFTEEN_MINUTE`) output:
+- `patterns[]` / `primaryPattern` — engulfing (bull/bear), doji, hammer, shooting star, inside bar
+- `structureBias` / `structureSequence` — swing high/low (lookback=3) → HH_HL (bullish) / LH_LL (bearish) / mixed ranging / insufficient
+- `candleStrength` ∈ [0,1] = `0.5*(body/range) + 0.5*((close−low)/range)`; `candleDirection` ∈ {−1,0,+1}
+- `signals[]` — human-readable crumbs for UI / synthesizer later
+
+**Rules (auditable):**
+- Doji: `|close−open|/(high−low) < 0.1`
+- Hammer: lower wick > 2× body AND upper wick ≤ body
+- Shooting star: upper wick > 2× body AND lower wick ≤ body
+- Inside bar: `high < prev.high AND low > prev.low`
+- Engulfing: current body fully covers prior body with opposite color
+- Structure eps: 0.02% of price so index micro-noise does not flip HH/HL
+
+**API:** `GET /api/scalp/candles?underlying=NIFTY&priceAction=1`  
+**Test:** `npm run test:scalp-pa`
+
+This stage does **not** emit Buy/Sell — confluence is consumed by Stage 8 synthesizer weighting.
+
+### 3.1c Scalping Mode — volume confirm / disqualify (Stage 3)
+
+**Module:** `src/lib/marketdata/scalp/volume.ts`
+
+Volume is **never** a standalone directional signal. It only adjusts confidence from Stage 2 price-action.
+
+| Parameter | Value | Meaning |
+|-----------|------:|---------|
+| `VOLUME_LOOKBACK` | 20 | Rolling mean of prior 20 completed bars (excludes current) |
+| `VOLUME_SPIKE_MULT` | 1.5 | `current ≥ 1.5 × avg` → spike (confirm when candle has direction) |
+| `VOLUME_WEAK_MULT` | 0.6 | `current < 0.6 × avg` → weak (disqualify pressure) |
+| `VOLUME_CONFIRM_BOOST` | +0.15 | Added to confidence on directional spike |
+| `VOLUME_WEAK_PENALTY` | −0.25 | Subtracted on weak volume |
+
+`ratio = currentVolume / avgVolume`. Adjusted confidence clamped to [0, 1].
+
+**API:** `GET /api/scalp/candles?underlying=NIFTY&volume=1` (also runs price-action seed)  
+**Test:** `npm run test:scalp-volume`
+
+### 3.1d Scalping Mode — liquidity zones (Stage 4)
+
+**Module:** `src/lib/marketdata/scalp/liquidity.ts` · UI: `LiquidityStatusBadge`
+
+Strike-level liquidity from option chain **bid/ask + volume + OI** (Angel quote `FULL` / NSE OC — both expose these fields in-repo).
+
+| Parameter | Value | Rule |
+|-----------|------:|------|
+| ATM band | ±1.5% spot | Scalp-relevant strikes only |
+| Wide spread | `(ask−bid)/ltp > 8%` | Illiquid |
+| Tight spread | `≤ 3%` | Good (with volume/OI) |
+| Min volume | 100 | Below → low volume |
+| Min OI | 5,000 | Below → thin OI |
+
+**Hard gate:** ATM focus contract unsuitable → status `fail` / badge **"Unsuitable for scalping"** (not a muted number). Mixed band → `warn`. Clean → `pass`.
+
+Wired into `runSynthesis` (`scalpLiquidity`) + Analysis verdict header badge + bearish callout on fail. Options Flow scalp path reuses the same assessor.
+
+### 3.1e Scalping Mode — stop-loss clusters / S-R (Stage 5)
+
+**Module:** `src/lib/marketdata/scalp/stopLossClusters.ts`
+
+Levels from: recent swing high/low (lookback=3), round-number steps (NIFTY 50 / BN 100 / SENSEX 100), OI walls (PE max ≤ spot = support; CE max ≥ spot = resistance). Merged within 0.05% of spot; kept within ±2% of spot.
+
+**Chart:** solid horizontals on `AnalysisLiveChart` — **blue** support (`theme.clusterSupport`) / **violet** resistance (`theme.clusterResistance`) — deliberately not candle bull/bear greens/reds. Trade-plan Entry/SL/TP stay dashed gold/bear/bull.
+
+**Test:** `npm run test:scalp-clusters`
+
+### 3.1f Scalping Mode — OI velocity (Stage 6)
+
+**Module:** `src/lib/marketdata/scalp/oiVelocity.ts`
+
+Reuses §2.2 OI wall heuristic, then adds **velocity**:
+`velocityPerMin = (oiNow − oiPrev) / elapsedMinutes` over near-ATM (±1.5%) CE/PE.
+Target spacing `OI_VELOCITY_TARGET_MINUTES = 5`. First snapshot (or <30s elapsed) → `warming_up` (never fabricates velocity). Notable when `|net CE−PE velocity| ≥ 2000 OI/min`.
+
+In-process prior snapshot map (single-instance). Synthesis attaches `oiVelocity` on SCALP runs.
+
+**Test:** `npm run test:scalp-oi`
+
+### 3.1g Confirmation candle (Stage 7)
+
+**Module:** `src/lib/marketdata/scalp/confirmationCandle.ts`
+
+**Default rule (configurable):**
+- Trigger TF: `FIVE_MINUTE` (`SCALP_CONFIRM_TIMEFRAME`)
+- Signal bar = closed bar[-2]; confirm bar = closed bar[-1]
+- Bullish: confirm close **>** signal high; bearish: confirm close **<** signal low (`SCALP_CONFIRM_CLOSE_BEYOND`)
+- Rising volume: confirm.volume > signal.volume (`SCALP_CONFIRM_RISING_VOLUME`)
+- Status: `pending` | `confirmed` | `failed` | `none`
+
+**Audit note:** `confirmed` = rule pass only. UI reliability note states this is **not** a validated edge.
+
+**Test:** `npm run test:scalp-confirm`
+
+### 3.1h Scalp signal synthesis + card (Stage 8)
+
+**Module:** `src/lib/marketdata/scalp/scalpSignal.ts` · UI: `ScalpSignalCard`
+
+Combines Stages 2–7 into one card (TF confluence, pattern, volume role, liquidity badge, nearest SL clusters, OI velocity, confirmation status).  
+`technicalBiasAdj` is added into the **existing** technical lane score before §2.5 weighted synthesis (SCALP weights unchanged: Flow 0.45 / Tech 0.35 / Sent 0.10 / Macro 0.10) — no second scorer.
+
+Actionable only when confirm=`confirmed` AND liquidity≠`fail` AND volume≠`disqualify` — still labeled heuristic.
 
 ## 4. Paper trading
 
@@ -119,6 +254,14 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Folder structure (`marketdata/`, `lanes/`, `synthesis/`, `paperTrading/`, `backtest/`)
 - docs/PROJECT.md + README + `.env.example`
 - Stage 1: Angel One auth, LTP, candles, option chain, throttle/retry, `/api/marketdata/test`
+- Scalp Stage 1: Multi-TF candle pipeline (`src/lib/marketdata/scalp/`) — Angel 1m/3m/5m/15m sequential fetch, Postgres `MarketCandle` upsert, Redis/TTL cache, `GET /api/scalp/candles`, `npm run poll:scalp-candles`; DB-cache / demo degrade path documented in §3.1
+- Scalp Stage 2: Per-TF price action (`priceAction.ts`) — engulfing/doji/hammer/shooting-star/inside-bar + HH/HL structure + candle strength; `?priceAction=1` on scalp candles API; `npm run test:scalp-pa`
+- Scalp Stage 3: Volume confirm/disqualify (`volume.ts`) — lookback=20, spike≥1.5×avg, weak<0.6×avg; adjusts PA confidence (±0.15 / −0.25); `?volume=1`; `npm run test:scalp-volume`
+- Scalp Stage 4: Liquidity gate (`liquidity.ts` + `LiquidityStatusBadge`) — spread/volume/OI ATM-band; hard unsuitable-for-scalping fail; synthesis `scalpLiquidity`; `npm run test:scalp-liquidity`
+- Scalp Stage 5: SL-cluster / S-R (`stopLossClusters.ts`) — swings + round numbers + OI walls; chart blue/violet horizontals (not candle colors); `npm run test:scalp-clusters`
+- Scalp Stage 6: OI velocity (`oiVelocity.ts`) — ΔOI/minutes near ATM; warming_up until prior snapshot; synthesis `oiVelocity`; `npm run test:scalp-oi`
+- Scalp Stage 7: Confirmation candle (`confirmationCandle.ts`) — next closed 5m bar beyond trigger + rising volume; env-configurable; `npm run test:scalp-confirm`
+- Scalp Stage 8: Scalp signal card (`scalpSignal.ts` + `ScalpSignalCard`) — confluence/pattern/volume/liquidity/clusters/OI/confirm in one place; bias feeds existing §2.5 synthesizer
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
 - Stage 2.5a: Live Macro lane — weighted heuristic from cached dashboard macro quotes (VIX, USDINR, Gift Nifty, US overnight, crude, DXY); degrades to score 0 on fetch failure
 - Stage 2.5b: Live Sentiment lane — FII/DII cash net (NSE `fiidiiTradeReact`, Mr Chartist fallback) + news BULL/BEAR aggregate from shared RSS cache; independent sub-signal degrade; all four lanes live
@@ -136,7 +279,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 
 ### Not Yet
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
-- TimescaleDB IV time-series store (IV trend currently from live + candle-derived proxy)
+- TimescaleDB hypertables for long-horizon IV / candle history (scalp candles use Postgres `MarketCandle` for now; IV trend still live + candle-derived proxy)
 - Upstash Redis pub/sub for scalp second-level polling
 - Angel WebSocket for option-chain strikes / multi-instance Redis fan-out (dashboard indices use in-process Angel WS + SSE; Gift still public)
 - Real broker order placement (intentionally out of scope)
@@ -145,7 +288,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 
 | Source | Used for | Cost | Rate limits / notes | Fallback |
 |--------|----------|------|---------------------|----------|
-| Angel One SmartAPI | Auth (TOTP), LTP, historical OHLCV, market quote FULL (OI/IV), scrip master for option chain, **WebSocket 2.0** index ticks (`wss://smartapisocket.angelone.in/smart-stream`) for dashboard Nifty/BankNifty/Sensex | Free tier (SmartAPI app) | Session valid until midnight; ≤3 concurrent WS per client; heartbeat `ping` ~30s; historical intervals have day-range caps; REST throttle ~3–5 req/s; retry/backoff on 5xx/429 | Typed `MarketDataUnavailableError`; WS down → public NSE spot fallback; demo mock mode if credentials missing |
+| Angel One SmartAPI | Auth (TOTP), LTP, historical OHLCV (incl. scalp 1m/3m/5m/15m via `getCandleData`), market quote FULL (OI/IV), scrip master for option chain, **WebSocket 2.0** index ticks (`wss://smartapisocket.angelone.in/smart-stream`) for dashboard Nifty/BankNifty/Sensex | Free tier (SmartAPI app) | Session valid until midnight; ≤3 concurrent WS per client; heartbeat `ping` ~30s; historical max-days/request (1m=30, 3m=60, 5m=100, 15m=200) + ~500-row ceiling; REST throttle ~3–5 req/s; scalp MTF uses sequential gaps (`angelThrottle` + 350ms TF / 800ms underlying); retry/backoff on 5xx/429 | Typed `MarketDataUnavailableError`; WS down → public NSE spot fallback; scalp candles → `MarketCandle` DB cache then empty/degraded; demo mock mode if credentials missing |
 | OpenAPI Scrip Master JSON | Symbol tokens for NIFTY/BANKNIFTY/SENSEX options | Free public dump | Cache locally; refresh periodically | Cached file / demo strikes |
 | Gift Nifty (NSE IFSC / NSE IX) | Dashboard + Macro lane Gift Nifty premium/discount cue | Free via `live.giftcitynifty.com/api/gift-nifty` | Soft limits; unofficial mirror of NSE IX; shared `getCachedMacroQuotes` TTL ~12s | Labeled Nifty 50 proxy if feed down; Macro lane omits Gift component |
 | Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN; macro quotes (US/Asia indices, ^INDIAVIX, CL=F, BZ=F, DX-Y.NYB, INR=X) for dashboard strip **and** Macro lane scoring; **Analysis live chart** timed OHLC (`5m`/`60m` via `/api/analysis/candles` → `getPublicAnalysisCandles`) | Free unofficial | Soft rate limits; may 429; `/v7/quote` often Unauthorized — use `/v8/finance/chart`; analysis candles TTL ~20s | NSE `allIndices` spot for Nifty/Bank Nifty/India VIX; Macro lane score 0 + `"macro data unavailable"` if all feeds fail; analysis chart: Angel OHLC when non-demo, else 503 |
@@ -155,7 +298,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 | NSE India `fiidiiTradeReact` | Sentiment lane daily FII/DII cash net (₹ Cr) | Free public | Cookie/UA soft limits; provisional figures; shared TTL ~15m | Mr Chartist mirror; Sentiment omits FII/DII component if both fail |
 | Mr Chartist FII/DII API (`fii-diidata.mrchartist.com/api/data`) | Sentiment lane FII/DII fallback (NSE-sourced mirror) | Free unofficial | Soft / polite limits; evening provisional | Sentiment news-only partial score if this and NSE both fail |
 | NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY | Free public | Cookie session + soft rate limits; SENSEX not on this API | Angel One quote FULL; then labeled demo mocks |
-| Postgres (Supabase) via Prisma | Paper account, positions, trade ideas, backtest outcomes | Per Supabase plan | Pooler cold starts / network blips | In-memory + `.data/paper-account.json` mirror after successful read; file-only store if no `DATABASE_URL` |
+| Postgres (Supabase) via Prisma | Paper account, positions, trade ideas, backtest outcomes, **scalp `MarketCandle` OHLCV** (1m/3m/5m/15m) | Per Supabase plan | Pooler cold starts / network blips | In-memory + `.data/paper-account.json` mirror after successful read; file-only store if no `DATABASE_URL`; scalp fetch still works without DB (no persist / no DB-cache fallback) |
 | Upstash Redis | Optional cache; future scalp pub/sub | Free tier limits apply | Per-plan | No-op client when env missing |
 
 ## Build order (reference)

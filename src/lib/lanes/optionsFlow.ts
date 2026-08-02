@@ -3,6 +3,7 @@ import {
   type OptionChainResult,
   type Underlying,
 } from "@/lib/marketdata/angelone";
+import { assessScalpLiquidity } from "@/lib/marketdata/scalp/liquidity";
 import { clampScore, type LaneResult, type TradingMode } from "./types";
 
 function calcPcr(chain: OptionChainResult): { overall: number; ntm: number } {
@@ -147,23 +148,14 @@ export async function runOptionsFlowLane(params: {
     signals.push("Max pain below spot — mild downward magnet");
   }
 
-  // Scalp: weight OI velocity proxy via volume/OI near ATM
+  // Scalp: liquidity gate (Stage 4) + call/put volume skew near ATM
   const lowLiquidityStrikes: number[] = [];
   if (mode === "SCALP") {
-    for (const c of chain.contracts) {
-      const spread =
-        c.bid != null && c.ask != null && c.ltp > 0
-          ? (c.ask - c.bid) / c.ltp
-          : 0;
-      const illiquid = spread > 0.08 || (c.volume ?? 0) < 100;
-      if (illiquid) lowLiquidityStrikes.push(c.strike);
-    }
-    const uniq = [...new Set(lowLiquidityStrikes)];
-    if (uniq.length) {
-      signals.push(
-        `Scalp liquidity flag: ${uniq.length} strikes with wide spread / low volume`,
-      );
-    }
+    const liq = assessScalpLiquidity(chain);
+    lowLiquidityStrikes.push(...liq.lowLiquidityStrikes);
+    if (liq.warning) signals.push(liq.warning);
+    else signals.push(...liq.signals.slice(0, 1));
+
     // Momentum from call vs put volume near money
     let callVol = 0;
     let putVol = 0;

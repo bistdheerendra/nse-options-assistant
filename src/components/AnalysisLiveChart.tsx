@@ -25,6 +25,13 @@ export type ChartTradeLevels = {
   takeProfit2: number | null;
 };
 
+/** Stage 5 SL-cluster / S-R lines (colors distinct from candle bull/bear). */
+export type ChartClusterLevel = {
+  price: number;
+  kind: "support" | "resistance";
+  label: string;
+};
+
 type CandleBar = {
   time: number;
   open: number;
@@ -51,6 +58,8 @@ type Props = {
   liveLtp: number | null;
   live: boolean;
   levels?: ChartTradeLevels | null;
+  /** Optional stop-loss cluster horizontals (Scalp Stage 5). */
+  clusterLevels?: ChartClusterLevel[] | null;
 };
 
 const REFRESH_MS = 30_000;
@@ -92,6 +101,7 @@ export function AnalysisLiveChart({
   liveLtp,
   live,
   levels,
+  clusterLevels,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -100,8 +110,10 @@ export function AnalysisLiveChart({
   const barsRef = useRef<CandlestickData[]>([]);
   const liveLtpRef = useRef(liveLtp);
   const levelsRef = useRef(levels);
+  const clusterRef = useRef(clusterLevels);
   liveLtpRef.current = liveLtp;
   levelsRef.current = levels;
+  clusterRef.current = clusterLevels;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -122,31 +134,59 @@ export function AnalysisLiveChart({
   function paintPriceLines(
     series: ISeriesApi<"Candlestick">,
     next: ChartTradeLevels | null | undefined,
+    clusters?: ChartClusterLevel[] | null,
   ) {
     clearPriceLines(series);
-    if (!next) return;
-    const specs: Array<{
-      price: number | null;
-      color: string;
-      title: string;
-    }> = [
-      { price: next.entry, color: theme.colors.gold, title: "Entry" },
-      { price: next.stopLoss, color: theme.colors.bear, title: "SL" },
-      { price: next.takeProfit1, color: theme.colors.bull, title: "TP1" },
-      { price: next.takeProfit2, color: theme.colors.bull, title: "TP2" },
-    ];
-    for (const s of specs) {
-      if (s.price == null || !Number.isFinite(s.price)) continue;
-      linesRef.current.push(
-        series.createPriceLine({
-          price: s.price,
-          color: s.color,
-          lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: s.title,
-        }),
-      );
+    if (next) {
+      const specs: Array<{
+        price: number | null;
+        color: string;
+        title: string;
+      }> = [
+        { price: next.entry, color: theme.colors.gold, title: "Entry" },
+        { price: next.stopLoss, color: theme.colors.bear, title: "SL" },
+        { price: next.takeProfit1, color: theme.colors.bull, title: "TP1" },
+        { price: next.takeProfit2, color: theme.colors.bull, title: "TP2" },
+      ];
+      for (const s of specs) {
+        if (s.price == null || !Number.isFinite(s.price)) continue;
+        linesRef.current.push(
+          series.createPriceLine({
+            price: s.price,
+            color: s.color,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: s.title,
+          }),
+        );
+      }
+    }
+    // SL clusters: solid lines, blue support / violet resistance (not candle colors)
+    if (clusters?.length) {
+      // Cap to strongest few so the chart stays readable
+      const top = [...clusters]
+        .sort((a, b) => {
+          // prefer stronger labels later if strength embedded; keep order by kind then price
+          return a.price - b.price;
+        })
+        .slice(0, 8);
+      for (const c of top) {
+        if (!Number.isFinite(c.price)) continue;
+        linesRef.current.push(
+          series.createPriceLine({
+            price: c.price,
+            color:
+              c.kind === "support"
+                ? theme.colors.clusterSupport
+                : theme.colors.clusterResistance,
+            lineWidth: 1,
+            lineStyle: LineStyle.Solid,
+            axisLabelVisible: true,
+            title: c.label,
+          }),
+        );
+      }
     }
   }
 
@@ -197,7 +237,7 @@ export function AnalysisLiveChart({
 
     chartRef.current = chart;
     seriesRef.current = series;
-    paintPriceLines(series, levelsRef.current);
+    paintPriceLines(series, levelsRef.current, clusterRef.current);
 
     return () => {
       linesRef.current = [];
@@ -270,13 +310,13 @@ export function AnalysisLiveChart({
     seriesRef.current.update(next[next.length - 1]!);
   }, [liveLtp]);
 
-  // Trade-plan price lines
+  // Trade-plan + SL-cluster price lines
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    paintPriceLines(series, levels);
+    paintPriceLines(series, levels, clusterLevels);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- paintPriceLines is stable enough here
-  }, [levels]);
+  }, [levels, clusterLevels]);
 
   return (
     <div className="flex h-full min-h-72 flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface sm:min-h-105">
@@ -326,6 +366,7 @@ export function AnalysisLiveChart({
               ? "Public OHLC · live spot sync"
               : "Live OHLC"}
         {" · "}Entry / SL / TP dashed when synthesis is run
+        {" · "}Scalp SL-clusters: blue support / violet resistance
       </p>
     </div>
   );

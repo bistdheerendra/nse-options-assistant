@@ -1,7 +1,9 @@
 "use client";
 
 import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
+import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
+import { ScalpSignalCard } from "@/components/ScalpSignalCard";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
 import { motion } from "framer-motion";
 import {
@@ -42,6 +44,74 @@ type SynthesisPayload = {
   lanes: Record<string, { score: number; signals: string[] }>;
   confidenceLabel: string;
   scalpLiquidityWarning: string | null;
+  scalpLiquidity: {
+    status: "pass" | "fail" | "warn" | "unavailable";
+    badgeLabel: string;
+    warning: string | null;
+    counts: {
+      evaluated: number;
+      unsuitable: number;
+      high: number;
+      medium: number;
+      low: number;
+    };
+    focus: {
+      strike: number;
+      optionType: "CE" | "PE";
+      spreadPct: number | null;
+      volume: number;
+      oi: number;
+    } | null;
+  } | null;
+  stopLossClusters: {
+    levels: Array<{
+      price: number;
+      kind: "support" | "resistance";
+      label: string;
+      strength: number;
+    }>;
+    support: Array<{ price: number; label: string; strength: number }>;
+    resistance: Array<{ price: number; label: string; strength: number }>;
+  } | null;
+  oiVelocity: {
+    status: "ready" | "warming_up" | "unavailable";
+    netVelocityPerMin: number | null;
+    callVelocityPerMin: number | null;
+    putVelocityPerMin: number | null;
+    notable: boolean;
+    signals: string[];
+  } | null;
+  scalpSignal: {
+    timeframeConfluence: {
+      bullish: string[];
+      bearish: string[];
+      ranging: string[];
+      dominant: "bullish" | "bearish" | null;
+    };
+    primaryPattern: string | null;
+    patternTimeframe: string | null;
+    volumeConfirmation: string;
+    liquidityStatus: "pass" | "fail" | "warn" | "unavailable";
+    liquidityBadge: string;
+    stopLossClusters: {
+      nearestSupport: number | null;
+      nearestResistance: number | null;
+    };
+    oiVelocity: {
+      status: string;
+      netPerMin: number | null;
+      notable: boolean;
+      reading: string;
+    };
+    confirmation: {
+      status: string;
+      direction: string | null;
+      reason: string;
+      reliabilityNote: string;
+    };
+    actionable: boolean;
+    actionableNote: string;
+  } | null;
   swingThetaWarning: string | null;
   daysToExpiry: number | null;
   tradeIdeaId: string | null;
@@ -203,6 +273,19 @@ export function AnalysisPanel() {
       }
     : null;
 
+  const clusterLevels =
+    data?.mode === "SCALP" && data.stopLossClusters
+      ? data.stopLossClusters.levels
+          .slice()
+          .sort((a, b) => b.strength - a.strength)
+          .slice(0, 8)
+          .map((l) => ({
+            price: l.price,
+            kind: l.kind,
+            label: l.label,
+          }))
+      : null;
+
   return (
     <div className="space-y-4 sm:space-y-6">
       <section className="space-y-2 sm:space-y-3">
@@ -306,6 +389,21 @@ export function AnalysisPanel() {
                 <span className="ml-auto text-xs text-binance-muted">
                   {data.alignment.label}
                 </span>
+                {data.mode === "SCALP" && data.scalpLiquidity && (
+                  <LiquidityStatusBadge
+                    status={data.scalpLiquidity.status}
+                    label={data.scalpLiquidity.badgeLabel}
+                    detail={
+                      data.scalpLiquidity.focus
+                        ? `ATM ${data.scalpLiquidity.focus.strike} ${data.scalpLiquidity.focus.optionType} · spread=${
+                            data.scalpLiquidity.focus.spreadPct != null
+                              ? `${(data.scalpLiquidity.focus.spreadPct * 100).toFixed(1)}%`
+                              : "n/a"
+                          } · vol=${data.scalpLiquidity.focus.volume} · OI=${data.scalpLiquidity.focus.oi}`
+                        : data.scalpLiquidity.warning
+                    }
+                  />
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3 px-3 py-3 sm:gap-4 sm:px-4 sm:py-4 lg:grid-cols-4">
@@ -420,12 +518,39 @@ export function AnalysisPanel() {
               liveLtp={liveLtp}
               live={live}
               levels={chartLevels}
+              clusterLevels={clusterLevels}
             />
           </div>
 
-          {(data.scalpLiquidityWarning || data.swingThetaWarning) && (
+          {data.mode === "SCALP" && data.scalpSignal && (
+            <ScalpSignalCard card={data.scalpSignal} />
+          )}
+
+          {data.mode === "SCALP" &&
+            data.scalpLiquidity &&
+            data.scalpLiquidity.status === "fail" && (
+              <div className="flex items-start gap-2 rounded-lg border border-binance-bear/50 bg-binance-bear/10 p-3 text-sm text-binance-bear">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-semibold">Unsuitable for scalping</p>
+                  <p className="mt-1 text-binance-bear/90">
+                    {data.scalpLiquidity.warning ?? data.scalpLiquidityWarning}
+                  </p>
+                </div>
+              </div>
+            )}
+
+          {data.mode === "SCALP" &&
+            data.scalpLiquidity &&
+            data.scalpLiquidity.status === "warn" && (
+              <div className="rounded-lg border border-binance-gold/30 bg-binance-elevated p-3 text-sm text-binance-gold">
+                {data.scalpLiquidity.warning ?? data.scalpLiquidityWarning}
+              </div>
+            )}
+
+          {data.swingThetaWarning && (
             <div className="rounded-lg border border-binance-gold/30 bg-binance-elevated p-3 text-sm text-binance-gold">
-              {data.scalpLiquidityWarning || data.swingThetaWarning}
+              {data.swingThetaWarning}
             </div>
           )}
 

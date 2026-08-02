@@ -100,6 +100,27 @@ model OptionsPosition {
   @@index([expiry, status])
 }
 
+/// Multi-timeframe OHLCV for scalp pipeline (1m/3m/5m/15m).
+/// Standard Postgres via Prisma — Timescale hypertables not wired (locked stack).
+model MarketCandle {
+  id         String   @id @default(cuid())
+  underlying String
+  /// Angel interval constant: ONE_MINUTE | THREE_MINUTE | FIVE_MINUTE | FIFTEEN_MINUTE | …
+  interval   String
+  time       DateTime
+  open       Float
+  high       Float
+  low        Float
+  close      Float
+  volume     Float
+  /// angel | demo | yahoo — never silent about stubs
+  source     String   @default("angel")
+  fetchedAt  DateTime @default(now())
+
+  @@unique([underlying, interval, time])
+  @@index([underlying, interval, time])
+}
+
 /// Closed-idea outcomes for time-ordered track record
 model BacktestOutcome {
   id               String   @id @default(cuid())

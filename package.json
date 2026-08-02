@@ -10,7 +10,14 @@
     "postinstall": "prisma generate",
     "test:lanes": "tsx scripts/test-lanes.ts",
     "test:backtest": "tsx scripts/test-backtest.ts",
+    "test:scalp-pa": "tsx scripts/test-scalp-price-action.ts",
+    "test:scalp-volume": "tsx scripts/test-scalp-volume.ts",
+    "test:scalp-liquidity": "tsx scripts/test-scalp-liquidity.ts",
+    "test:scalp-clusters": "tsx scripts/test-scalp-clusters.ts",
+    "test:scalp-oi": "tsx scripts/test-scalp-oi-velocity.ts",
+    "test:scalp-confirm": "tsx scripts/test-scalp-confirmation.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",
+    "poll:scalp-candles": "tsx scripts/poll-scalp-candles.ts",
     "db:push": "prisma db push"
   },
   "dependencies": {
