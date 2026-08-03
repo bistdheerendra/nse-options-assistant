@@ -1,4 +1,4 @@
-import type { Underlying } from "@/lib/marketdata/angelone";
+import type { CandleInterval, Underlying } from "@/lib/marketdata/angelone";
 import { withTtlCache } from "@/lib/marketdata/ttlCache";
 
 export type TimedOhlcv = {
@@ -9,6 +9,70 @@ export type TimedOhlcv = {
   close: number;
   volume: number;
 };
+
+/** Scalp analysis chart timeframes (UI pills). */
+export type ScalpChartTf = "3m" | "5m" | "15m";
+
+export const SCALP_CHART_TFS: ScalpChartTf[] = ["3m", "5m", "15m"];
+
+export function isScalpChartTf(v: string): v is ScalpChartTf {
+  return (SCALP_CHART_TFS as string[]).includes(v);
+}
+
+export type AnalysisChartTfSpec = {
+  label: string;
+  angelInterval: CandleInterval;
+  lookbackDays: number;
+  /** Yahoo interval string, or null if Yahoo has no native TF (e.g. 3m). */
+  yahooInterval: string | null;
+  yahooRange: string;
+  maxBars: number;
+};
+
+export const SCALP_CHART_TF_SPEC: Record<ScalpChartTf, AnalysisChartTfSpec> = {
+  // Yahoo has no native 3m — Angel THREE_MINUTE, else 1m resampled → 3m
+  "3m": {
+    label: "3m",
+    angelInterval: "THREE_MINUTE",
+    lookbackDays: 5,
+    yahooInterval: null,
+    yahooRange: "5d",
+    maxBars: 180,
+  },
+  "5m": {
+    label: "5m",
+    angelInterval: "FIVE_MINUTE",
+    lookbackDays: 5,
+    yahooInterval: "5m",
+    yahooRange: "5d",
+    maxBars: 180,
+  },
+  "15m": {
+    label: "15m",
+    angelInterval: "FIFTEEN_MINUTE",
+    lookbackDays: 10,
+    yahooInterval: "15m",
+    yahooRange: "1mo",
+    maxBars: 200,
+  },
+};
+
+const SWING_SPEC: AnalysisChartTfSpec = {
+  label: "1h",
+  angelInterval: "ONE_HOUR",
+  lookbackDays: 60,
+  yahooInterval: "60m",
+  yahooRange: "3mo",
+  maxBars: 240,
+};
+
+export function chartTfSpec(
+  mode: "SCALP" | "SWING",
+  scalpTf: ScalpChartTf = "5m",
+): AnalysisChartTfSpec {
+  if (mode === "SWING") return SWING_SPEC;
+  return SCALP_CHART_TF_SPEC[scalpTf];
+}
 
 const YAHOO_SYMBOL: Record<Underlying, string> = {
   NIFTY: "^NSEI",
@@ -34,21 +98,12 @@ type YahooChartResponse = {
   };
 };
 
-function yahooParams(mode: "SCALP" | "SWING"): {
-  interval: string;
-  range: string;
-} {
-  // Scalp chart = intraday 5m; Swing = hourly lookback
-  if (mode === "SCALP") return { interval: "5m", range: "5d" };
-  return { interval: "60m", range: "3mo" };
-}
-
-async function fetchYahooTimedCandles(
+async function fetchYahooRaw(
   underlying: Underlying,
-  mode: "SCALP" | "SWING",
+  interval: string,
+  range: string,
 ): Promise<TimedOhlcv[] | null> {
   const symbol = YAHOO_SYMBOL[underlying];
-  const { interval, range } = yahooParams(mode);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`;
   const res = await fetch(url, {
     headers: {
@@ -92,24 +147,73 @@ async function fetchYahooTimedCandles(
       volume: Number(q.volume?.[i] ?? 0),
     });
   }
+  return out;
+}
 
-  // Cap series length for chart clarity
-  const maxBars = mode === "SCALP" ? 180 : 240;
-  return out.slice(-maxBars);
+/**
+ * Aggregate 1m bars into N-minute OHLC (used when Yahoo lacks native 3m).
+ * Bucket start = floor(unixSec / (periodMin*60)) * periodMin*60
+ */
+export function aggregateTimedBars(
+  bars: TimedOhlcv[],
+  periodMin: number,
+): TimedOhlcv[] {
+  if (periodMin <= 1 || bars.length === 0) return bars;
+  const bucketSec = periodMin * 60;
+  const map = new Map<number, TimedOhlcv>();
+  const order: number[] = [];
+
+  for (const b of bars) {
+    const key = Math.floor(b.time / bucketSec) * bucketSec;
+    const cur = map.get(key);
+    if (!cur) {
+      map.set(key, { ...b, time: key });
+      order.push(key);
+    } else {
+      cur.high = Math.max(cur.high, b.high);
+      cur.low = Math.min(cur.low, b.low);
+      cur.close = b.close;
+      cur.volume += b.volume;
+    }
+  }
+  return order.map((k) => map.get(k)!);
 }
 
 /**
  * Public (Yahoo) timed OHLC for analysis chart — matches live NSE spot closely.
- * Prefer this over Angel mock candles so the forming-bar LTP patch does not spike.
+ * For 3m: Yahoo has no native interval → fetch 1m and aggregate to 3m (labeled source still yahoo).
  */
 export async function getPublicAnalysisCandles(
   underlying: Underlying,
   mode: "SCALP" | "SWING",
+  scalpTf: ScalpChartTf = "5m",
 ): Promise<TimedOhlcv[] | null> {
-  const { interval, range } = yahooParams(mode);
+  const spec = chartTfSpec(mode, scalpTf);
+
+  if (spec.yahooInterval) {
+    return withTtlCache(
+      `analysis-yahoo:${underlying}:${spec.yahooInterval}:${spec.yahooRange}`,
+      20_000,
+      async () => {
+        const raw = await fetchYahooRaw(
+          underlying,
+          spec.yahooInterval!,
+          spec.yahooRange,
+        );
+        if (!raw) return null;
+        return raw.slice(-spec.maxBars);
+      },
+    );
+  }
+
+  // 3m path: aggregate Yahoo 1m → 3m
   return withTtlCache(
-    `analysis-yahoo:${underlying}:${interval}:${range}`,
+    `analysis-yahoo:${underlying}:1m-agg-3m:5d`,
     20_000,
-    () => fetchYahooTimedCandles(underlying, mode),
+    async () => {
+      const raw1m = await fetchYahooRaw(underlying, "1m", "5d");
+      if (!raw1m || raw1m.length < 8) return null;
+      return aggregateTimedBars(raw1m, 3).slice(-spec.maxBars);
+    },
   );
 }

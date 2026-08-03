@@ -1,6 +1,7 @@
 "use client";
 
 import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
+import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
 import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { ScalpSignalCard } from "@/components/ScalpSignalCard";
@@ -12,10 +13,15 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 type Underlying = "NIFTY" | "BANKNIFTY" | "SENSEX";
+
+const AUTO_PAPER_LS_KEY = "nse:scalpAutoPaper";
+const AUTO_PAPER_ACK_LS_KEY = "nse:scalpAutoPaperAckSell";
+/** Poll interval when auto-paper toggle is ON (Scalp mode only). */
+const AUTO_PAPER_POLL_MS = 60_000;
 
 function parseUnderlying(raw: string | null): Underlying {
   if (raw === "BANKNIFTY" || raw === "SENSEX" || raw === "NIFTY") return raw;
@@ -178,6 +184,95 @@ export function AnalysisPanel() {
   const [marking, setMarking] = useState(false);
   const [markMsg, setMarkMsg] = useState<string | null>(null);
   const [markOk, setMarkOk] = useState(false);
+  const [autoPaper, setAutoPaper] = useState(false);
+  const [autoAckSell, setAutoAckSell] = useState(false);
+  const [autoStatus, setAutoStatus] = useState<string | null>(null);
+  const [autoRunning, setAutoRunning] = useState(false);
+  const autoInFlight = useRef(false);
+
+  // Restore opt-in auto-paper prefs (default OFF)
+  useEffect(() => {
+    try {
+      setAutoPaper(localStorage.getItem(AUTO_PAPER_LS_KEY) === "true");
+      setAutoAckSell(localStorage.getItem(AUTO_PAPER_ACK_LS_KEY) === "true");
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const persistAutoPaper = useCallback((on: boolean) => {
+    setAutoPaper(on);
+    try {
+      localStorage.setItem(AUTO_PAPER_LS_KEY, on ? "true" : "false");
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const persistAutoAckSell = useCallback((on: boolean) => {
+    setAutoAckSell(on);
+    try {
+      localStorage.setItem(AUTO_PAPER_ACK_LS_KEY, on ? "true" : "false");
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const runAutoPaper = useCallback(async () => {
+    if (autoInFlight.current) return;
+    autoInFlight.current = true;
+    setAutoRunning(true);
+    try {
+      const res = await fetch("/api/cron/scalp-auto-paper", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          underlying,
+          acknowledgeSellRisk: autoAckSell,
+        }),
+      });
+      const json = (await res.json()) as {
+        openedCount?: number;
+        items?: Array<{
+          underlying: string;
+          opened: boolean;
+          detail: string;
+          skipped?: string;
+        }>;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(json.error ?? "Auto paper failed");
+
+      const item = json.items?.find((i) => i.underlying === underlying);
+      const opened = json.openedCount ?? 0;
+      if (opened > 0 && item?.opened) {
+        setMarkOk(true);
+        setMarkMsg(item.detail);
+        setAutoStatus(`Auto paper opened: ${item.detail}`);
+      } else {
+        setAutoStatus(
+          item
+            ? `Auto check: ${item.detail}`
+            : `Auto check done — opened ${opened}`,
+        );
+      }
+    } catch (e) {
+      setAutoStatus(e instanceof Error ? e.message : "Auto paper error");
+    } finally {
+      autoInFlight.current = false;
+      setAutoRunning(false);
+    }
+  }, [underlying, autoAckSell]);
+
+  // Poll while auto-paper ON + Scalp mode (paper only)
+  useEffect(() => {
+    if (!autoPaper || mode !== "SCALP") return;
+    void runAutoPaper();
+    const id = setInterval(() => {
+      void runAutoPaper();
+    }, AUTO_PAPER_POLL_MS);
+    return () => clearInterval(id);
+  }, [autoPaper, mode, runAutoPaper]);
 
   const { cards, live } = useDashboardLiveStream();
   const liveLtp = useMemo(() => {
@@ -326,12 +421,49 @@ export function AnalysisPanel() {
         </button>
       </div>
 
+      {mode === "SCALP" && (
+        <div className="flex flex-col gap-2 rounded-lg border border-binance-border bg-binance-elevated/60 px-3 py-2.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-binance-text">
+            <input
+              type="checkbox"
+              checked={autoPaper}
+              onChange={(e) => persistAutoPaper(e.target.checked)}
+              className="accent-binance-gold"
+            />
+            <span className="font-medium">Auto paper on actionable scalp</span>
+            <span className="text-xs text-binance-muted">(off by default · ~60s)</span>
+          </label>
+          <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-binance-muted">
+            <input
+              type="checkbox"
+              checked={autoAckSell}
+              onChange={(e) => persistAutoAckSell(e.target.checked)}
+              disabled={!autoPaper}
+              className="accent-binance-gold"
+            />
+            Allow auto Sell/write (uncapped/large risk · paper only)
+          </label>
+          {autoPaper && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-binance-muted">
+              {autoRunning ? (
+                <Loader2 className="h-3 w-3 animate-spin text-binance-gold" />
+              ) : (
+                <CheckCircle2 className="h-3 w-3 text-binance-gold" />
+              )}
+              {autoStatus ?? "Watching for Rule stack cleared…"}
+            </span>
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="flex items-start gap-2 rounded border border-binance-bear/40 bg-binance-elevated px-3 py-2 text-sm text-binance-bear">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           {error}
         </div>
       )}
+
+      <IndexDriversHeatmap underlying={underlying} />
 
       {data && (
         <motion.div

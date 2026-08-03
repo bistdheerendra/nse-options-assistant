@@ -2,10 +2,14 @@ import {
   getUnderlyingCandles,
   isDemoMarketDataMode,
   isMarketDataUnavailable,
-  type CandleInterval,
   type Underlying,
 } from "@/lib/marketdata/angelone";
-import { getPublicAnalysisCandles } from "@/lib/marketdata/analysisCandles";
+import {
+  chartTfSpec,
+  getPublicAnalysisCandles,
+  isScalpChartTf,
+  type ScalpChartTf,
+} from "@/lib/marketdata/analysisCandles";
 import { withTtlCache } from "@/lib/marketdata/ttlCache";
 import { NextResponse } from "next/server";
 
@@ -19,17 +23,6 @@ function angelTimeToUnixSec(time: string): number {
   const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(normalized);
   const ms = Date.parse(hasTz ? normalized : `${normalized}+05:30`);
   return Math.floor((Number.isFinite(ms) ? ms : Date.now()) / 1000);
-}
-
-function intervalForMode(mode: string): {
-  interval: CandleInterval;
-  lookbackDays: number;
-  label: string;
-} {
-  if (mode === "SCALP") {
-    return { interval: "FIVE_MINUTE", lookbackDays: 5, label: "5m" };
-  }
-  return { interval: "ONE_HOUR", lookbackDays: 60, label: "1h" };
 }
 
 function dedupeSort(
@@ -48,11 +41,16 @@ function dedupeSort(
     .filter((b, i, arr) => i === 0 || b.time !== arr[i - 1]!.time);
 }
 
+/**
+ * GET /api/analysis/candles?underlying=NIFTY&mode=SCALP&tf=5m
+ * Scalp tf: 3m | 5m | 15m (default 5m). Swing ignores tf → 1h.
+ */
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const underlying = (url.searchParams.get("underlying") ??
     "NIFTY") as Underlying;
   const modeParam = url.searchParams.get("mode") ?? "SCALP";
+  const tfParam = url.searchParams.get("tf") ?? "5m";
 
   if (!UNDERLYINGS.has(underlying)) {
     return NextResponse.json(
@@ -67,20 +65,26 @@ export async function GET(req: Request) {
     );
   }
   const mode = modeParam;
-  const { interval, lookbackDays, label } = intervalForMode(mode);
+  const scalpTf: ScalpChartTf =
+    mode === "SCALP" && isScalpChartTf(tfParam) ? tfParam : "5m";
+  const spec = chartTfSpec(mode, scalpTf);
   const demoMode = isDemoMarketDataMode();
 
   try {
     // Prefer Yahoo timed bars so chart OHLC aligns with dashboard live spot.
-    // Angel mock + live NSE LTP was painting a fake crash on the last candle.
-    const publicBars = await getPublicAnalysisCandles(underlying, mode);
+    const publicBars = await getPublicAnalysisCandles(
+      underlying,
+      mode,
+      scalpTf,
+    );
     if (publicBars && publicBars.length >= 8) {
       return NextResponse.json({
         ok: true,
         underlying,
         mode,
-        interval,
-        timeframeLabel: label,
+        tf: mode === "SCALP" ? scalpTf : "1h",
+        interval: spec.angelInterval,
+        timeframeLabel: spec.label,
         demoMode,
         source: "yahoo",
         fetchedAt: new Date().toISOString(),
@@ -88,7 +92,6 @@ export async function GET(req: Request) {
       });
     }
 
-    // Live Angel path (or Yahoo down) — skip Angel mocks in demo (wrong price level).
     if (demoMode) {
       return NextResponse.json(
         {
@@ -101,9 +104,14 @@ export async function GET(req: Request) {
     }
 
     const candles = await withTtlCache(
-      `analysis-angel:${underlying}:${interval}`,
+      `analysis-angel:${underlying}:${spec.angelInterval}`,
       15_000,
-      () => getUnderlyingCandles(underlying, interval, lookbackDays),
+      () =>
+        getUnderlyingCandles(
+          underlying,
+          spec.angelInterval,
+          spec.lookbackDays,
+        ),
     );
 
     const bars = dedupeSort(
@@ -115,14 +123,15 @@ export async function GET(req: Request) {
         close: c.close,
         volume: c.volume,
       })),
-    );
+    ).slice(-spec.maxBars);
 
     return NextResponse.json({
       ok: true,
       underlying,
       mode,
-      interval,
-      timeframeLabel: label,
+      tf: mode === "SCALP" ? scalpTf : "1h",
+      interval: spec.angelInterval,
+      timeframeLabel: spec.label,
       demoMode: false,
       source: "angel",
       fetchedAt: new Date().toISOString(),

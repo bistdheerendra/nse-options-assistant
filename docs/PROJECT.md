@@ -191,6 +191,15 @@ Combines Stages 2–7 into one card (TF confluence, pattern, volume role, liquid
 
 Actionable only when confirm=`confirmed` AND liquidity≠`fail` AND volume≠`disqualify` — still labeled heuristic.
 
+### 3.1i Auto paper on actionable scalp
+
+**Opt-in** (default OFF): Analysis UI toggle **Auto paper on actionable scalp** (~60s poll while Scalp mode).  
+Server: `POST/GET /api/cron/scalp-auto-paper` → `runScalpAutoPaper()` — paper only, never Angel placeOrder.
+
+Gates: `scalpSignal.actionable` + structure BUY/SELL + suggestedContract + no duplicate OPEN (same underlying/strike/CE|PE/action).  
+SELL also needs UI “Allow auto Sell/write” **or** `SCALP_AUTO_PAPER_ACK_SELL=true`.  
+`entrySnapshot.autoPaper=true` + scalp feature tags for track record.
+
 ## 4. Paper trading
 
 ### 4.1 PaperOptionsAccount
@@ -262,12 +271,13 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Scalp Stage 6: OI velocity (`oiVelocity.ts`) — ΔOI/minutes near ATM; warming_up until prior snapshot; synthesis `oiVelocity`; `npm run test:scalp-oi`
 - Scalp Stage 7: Confirmation candle (`confirmationCandle.ts`) — next closed 5m bar beyond trigger + rising volume; env-configurable; `npm run test:scalp-confirm`
 - Scalp Stage 8: Scalp signal card (`scalpSignal.ts` + `ScalpSignalCard`) — confluence/pattern/volume/liquidity/clusters/OI/confirm in one place; bias feeds existing §2.5 synthesizer
+- Scalp auto-paper (opt-in): UI toggle + `/api/cron/scalp-auto-paper` opens paper when rule stack cleared; dedupe OPEN; sell ack required; paper only
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
 - Stage 2.5a: Live Macro lane — weighted heuristic from cached dashboard macro quotes (VIX, USDINR, Gift Nifty, US overnight, crude, DXY); degrades to score 0 on fetch failure
 - Stage 2.5b: Live Sentiment lane — FII/DII cash net (NSE `fiidiiTradeReact`, Mr Chartist fallback) + news BULL/BEAR aggregate from shared RSS cache; independent sub-signal degrade; all four lanes live
 - Stage 3: Directional + structure synthesis, TradeIdea model, analysis UI
 - Stage 3.1: Synthesized verdict card — ATR trade plan (Entry/SL/TP1/TP2 + R:R), regime (TRENDING/CHOPPY/VOLATILE), lane alignment, experimental edge from track-record (no ML), Mark as taken → paper
-- Stage 3.2: Analysis **50/50** layout — verdict left, live candlestick chart right (`AnalysisLiveChart` / `lightweight-charts`). Candles from `/api/analysis/candles` (prefer Yahoo timed OHLC so series matches live spot; Angel when available / non-demo). Forming bar patched from dashboard SSE LTP only when within **0.5%** of last close (avoids mock↔live crash candle). Dashed Entry / SL / TP1 / TP2 price lines after synthesis. UI default mode **Scalp**.
+- Stage 3.2: Analysis **50/50** layout — verdict left, live candlestick chart right (`AnalysisLiveChart` / `lightweight-charts`). Candles from `/api/analysis/candles` (prefer Yahoo timed OHLC so series matches live spot; Angel when available / non-demo). **Scalp chart TF pills: 3m / 5m / 15m** (`?tf=`); 3m via Yahoo 1m→3m aggregate when native 3m absent. Swing stays 1h. Forming bar patched from dashboard SSE LTP only when within **0.5%** of last close. Dashed Entry / SL / TP1 / TP2 price lines after synthesis. UI default mode **Scalp**.
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror); open positions show duration + premium TP/SL; auto-close on TP/SL hit → Closed table with status reason
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
@@ -276,6 +286,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Responsive app shell: mobile bottom tab nav + safe-area; desktop top nav + footer (see §7).
 - Dashboard macro strip (`/api/dashboard/macro`): Gift Nifty proxy, India VIX (NSE/Yahoo), US (Dow/Nasdaq/S&P), Asian indices, WTI/Brent crude, DXY, USDINR; this-week economic highlights (Fed/CPI/GDP/NFP/RBI when present); today’s news via Google/Yahoo RSS. Free unofficial APIs — no paid keys. News/events show heuristic **BULL / BEAR / MIXED** bias pills (keyword + print-vs-forecast; labeled experimental). Macro quotes auto-refresh ~15s (LIVE badge; pauses when tab hidden).
 - Paper option chain: live NSE India OC for NIFTY/BANKNIFTY (Call/Put LTP + OI + % change, ~20s refresh); Groww-style spot marker between strikes.
+- Analysis index drivers heatmap (`IndexDriversHeatmap` / `/api/analysis/heatmap`) — top-weight Nifty / Bank Nifty / Sensex names; **est. contribution pts** = `weight% × day% × indexLevel / 10000` (approx weights, not live NSE free-float); cell color = day %; sorted by |points|
 
 ### Not Yet
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
@@ -291,7 +302,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 | Angel One SmartAPI | Auth (TOTP), LTP, historical OHLCV (incl. scalp 1m/3m/5m/15m via `getCandleData`), market quote FULL (OI/IV), scrip master for option chain, **WebSocket 2.0** index ticks (`wss://smartapisocket.angelone.in/smart-stream`) for dashboard Nifty/BankNifty/Sensex | Free tier (SmartAPI app) | Session valid until midnight; ≤3 concurrent WS per client; heartbeat `ping` ~30s; historical max-days/request (1m=30, 3m=60, 5m=100, 15m=200) + ~500-row ceiling; REST throttle ~3–5 req/s; scalp MTF uses sequential gaps (`angelThrottle` + 350ms TF / 800ms underlying); retry/backoff on 5xx/429 | Typed `MarketDataUnavailableError`; WS down → public NSE spot fallback; scalp candles → `MarketCandle` DB cache then empty/degraded; demo mock mode if credentials missing |
 | OpenAPI Scrip Master JSON | Symbol tokens for NIFTY/BANKNIFTY/SENSEX options | Free public dump | Cache locally; refresh periodically | Cached file / demo strikes |
 | Gift Nifty (NSE IFSC / NSE IX) | Dashboard + Macro lane Gift Nifty premium/discount cue | Free via `live.giftcitynifty.com/api/gift-nifty` | Soft limits; unofficial mirror of NSE IX; shared `getCachedMacroQuotes` TTL ~12s | Labeled Nifty 50 proxy if feed down; Macro lane omits Gift component |
-| Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN; macro quotes (US/Asia indices, ^INDIAVIX, CL=F, BZ=F, DX-Y.NYB, INR=X) for dashboard strip **and** Macro lane scoring; **Analysis live chart** timed OHLC (`5m`/`60m` via `/api/analysis/candles` → `getPublicAnalysisCandles`) | Free unofficial | Soft rate limits; may 429; `/v7/quote` often Unauthorized — use `/v8/finance/chart`; analysis candles TTL ~20s | NSE `allIndices` spot for Nifty/Bank Nifty/India VIX; Macro lane score 0 + `"macro data unavailable"` if all feeds fail; analysis chart: Angel OHLC when non-demo, else 503 |
+| Yahoo Finance chart API | Dashboard LTP + 5m candles for ^NSEI / ^NSEBANK / ^BSESN; macro quotes (US/Asia indices, ^INDIAVIX, CL=F, BZ=F, DX-Y.NYB, INR=X) for dashboard strip **and** Macro lane scoring; **Analysis live chart** timed OHLC (`5m`/`60m` via `/api/analysis/candles` → `getPublicAnalysisCandles`); **Analysis index drivers heatmap** (constituent day % via `RELIANCE.NS` etc., TTL ~20s, batched) | Free unofficial | Soft rate limits; may 429; `/v7/quote` often Unauthorized — use `/v8/finance/chart`; analysis candles TTL ~20s; heatmap concurrency 4 | NSE `allIndices` spot for Nifty/Bank Nifty/India VIX; Macro lane score 0 + `"macro data unavailable"` if all feeds fail; analysis chart: Angel OHLC when non-demo, else 503; heatmap cells show — when quote miss |
 | NSE India `allIndices` | Dashboard near-live LTP for Nifty / Bank Nifty / Sensex; India VIX spot (dashboard + Macro lane preferred VIX source); SSE forming-bar patch for analysis chart | Free public | Cookie/UA soft limits; ~1.5s in-process TTL coalesce | Yahoo chart; labeled demo; Macro lane omits VIX component if both fail |
 | Forex Factory week JSON (`nfs.faireconomy.media`) | Dashboard economic calendar (Fed/CPI/GDP/NFP; RBI when listed) | Free unofficial mirror | Soft limits; INR/RBI coverage sparse | Empty buckets + UI note |
 | Google News RSS + Yahoo Finance RSS | Dashboard “Today's News” + Sentiment lane headline bias aggregate | Free public RSS | Soft limits / regional variance; shared `getCachedMarketNews` TTL ~5m | Empty list + UI note; Sentiment omits news component and scores from FII/DII only |

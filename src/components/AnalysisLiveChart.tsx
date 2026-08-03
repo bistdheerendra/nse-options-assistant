@@ -1,6 +1,10 @@
 "use client";
 
 import { LiveBadge } from "@/components/LiveBadge";
+import {
+  SCALP_CHART_TFS,
+  type ScalpChartTf,
+} from "@/lib/marketdata/analysisCandles";
 import { theme } from "@/lib/theme";
 import {
   CandlestickSeries,
@@ -121,8 +125,15 @@ export function AnalysisLiveChart({
   const [candleSource, setCandleSource] = useState<"yahoo" | "angel" | null>(
     null,
   );
+  const [scalpTf, setScalpTf] = useState<ScalpChartTf>("5m");
   const [tfLabel, setTfLabel] = useState(mode === "SCALP" ? "5m" : "1h");
   const [displayLtp, setDisplayLtp] = useState<number | null>(liveLtp);
+
+  // Reset default TF when switching Scalp ↔ Swing
+  useEffect(() => {
+    if (mode === "SWING") setTfLabel("1h");
+    else setTfLabel(scalpTf);
+  }, [mode, scalpTf]);
 
   function clearPriceLines(series: ISeriesApi<"Candlestick">) {
     for (const line of linesRef.current) {
@@ -255,8 +266,10 @@ export function AnalysisLiveChart({
 
     const load = async () => {
       try {
+        const tfQs =
+          mode === "SCALP" ? `&tf=${encodeURIComponent(scalpTf)}` : "";
         const res = await fetch(
-          `/api/analysis/candles?underlying=${underlying}&mode=${mode}`,
+          `/api/analysis/candles?underlying=${underlying}&mode=${mode}${tfQs}`,
         );
         const json = (await res.json()) as CandlesResponse;
         if (cancelled) return;
@@ -297,7 +310,7 @@ export function AnalysisLiveChart({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [underlying, mode]);
+  }, [underlying, mode, scalpTf]);
 
   // Patch forming candle with live LTP (SSE / hub)
   useEffect(() => {
@@ -325,7 +338,33 @@ export function AnalysisLiveChart({
           Live chart
         </p>
         <span className="text-sm font-medium text-binance-text">{underlying}</span>
-        <span className="text-xs text-binance-muted">{tfLabel}</span>
+        {mode === "SCALP" ? (
+          <div
+            className="inline-flex rounded-md bg-binance-elevated p-0.5"
+            role="group"
+            aria-label="Chart timeframe"
+          >
+            {SCALP_CHART_TFS.map((tf) => {
+              const active = scalpTf === tf;
+              return (
+                <button
+                  key={tf}
+                  type="button"
+                  onClick={() => setScalpTf(tf)}
+                  className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
+                    active
+                      ? "bg-binance-gold text-binance-bg"
+                      : "text-binance-muted hover:text-binance-text"
+                  }`}
+                >
+                  {tf}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <span className="text-xs text-binance-muted">{tfLabel}</span>
+        )}
         <LiveBadge active={live && !loading && !error} />
         {displayLtp != null && (
           <span className="ml-auto font-mono text-sm tabular-nums text-binance-text">
@@ -365,7 +404,9 @@ export function AnalysisLiveChart({
             : demoMode
               ? "Public OHLC · live spot sync"
               : "Live OHLC"}
-        {" · "}Entry / SL / TP dashed when synthesis is run
+        {" · "}
+        {mode === "SCALP" ? "3m / 5m / 15m pills · " : "1h · "}
+        Entry / SL / TP dashed when synthesis is run
         {" · "}Scalp SL-clusters: blue support / violet resistance
       </p>
     </div>
