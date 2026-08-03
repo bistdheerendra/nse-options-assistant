@@ -254,6 +254,23 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 
 Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts` / `binance-*` Tailwind).
 
+### 7.1 Market session hours (IST)
+
+**Module:** `src/lib/marketdata/marketHours.ts`
+
+Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wall clock (no exchange holiday calendar).
+
+| Helper | Role |
+|--------|------|
+| `marketHoursForId(id)` | Session spec (open/close minutes or nearly-24h) keyed by quote id |
+| `isMarketOpenNow(id)` | True during regular session; weekends closed except nearly-24h products; overnight wraps (e.g. US ET → IST) |
+| `hoursIstForQuote(id)` | Display label, e.g. `9:15 AM – 3:30 PM IST` |
+| `isUsEasternDaylightTime()` | Switches US equity IST window EDT vs EST |
+
+**Coverage:** NSE indices + India VIX (9:15–15:30), Gift Nifty overnight, Asian equities, USDINR cash window, US (DJI/IXIC/GSPC/VIX) via ET→IST, crude/DXY as nearly 24h.
+
+**UI:** `IndexQuoteCard` (dashboard index cards) and `MacroDashboard` quote tiles show the hours line; **gold + ●** when session open, muted when closed. Client re-ticks ~30s so open/closed colors stay current without a full data refetch.
+
 ## Shipped vs Not Yet
 
 ### Shipped
@@ -283,14 +300,17 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror); open positions show duration + premium TP/SL; auto-close on TP/SL hit → Closed table with status reason
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
 - Stage 6.1: Backtest re-validation after 4-lane synthesis — `synthesisVersion` cohort split (legacy 2-lane-effective vs post-4-lane); edge badges use post-4-lane only with insufficient-sample gating; per-lane lean includes Macro + Sentiment
-- Dashboard (default `/`): Binance-style paper portfolio P&L header (`PortfolioPnlCard` — est. total value, today’s PnL, gold equity sparkline, hide-balance toggle, client retry) above index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). **Live path:** backend `liveQuoteHub` + Angel SmartAPI WebSocket 2.0 (`websocketFeed.ts`) for Nifty / Bank Nifty / Sensex ticks (push on each tick via SSE `/api/dashboard/stream`); Gift Nifty still ~0.5s public feed (not on SmartAPI); full candle snapshot ~30s. Public NSE spots remain fallback if WS down. Browser `EventSource`. With `MARKETDATA_DEMO_MODE=true` / missing Angel keys, LTP is public-feed only. Pulsing **LIVE** badge + price flash when LTP changes.
+- Dashboard (default `/`): Binance-style paper portfolio P&L header (`PortfolioPnlCard` — est. total value, today’s PnL, gold equity sparkline, hide-balance toggle, client retry) above index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). **Live path:** backend `liveQuoteHub` + Angel SmartAPI WebSocket 2.0 (`websocketFeed.ts`) for Nifty / Bank Nifty / Sensex ticks (push on each tick via SSE `/api/dashboard/stream`); Gift Nifty still ~0.5s public feed (not on SmartAPI); full candle snapshot ~30s. Public NSE spots remain fallback if WS down. Browser `EventSource`. With `MARKETDATA_DEMO_MODE=true` / missing Angel keys, LTP is public-feed only. Pulsing **LIVE** badge + price flash when LTP changes. Index cards show IST session hours with open/closed styling (§7.1).
 - Responsive app shell: mobile bottom tab nav + safe-area; desktop top nav + footer (see §7).
-- Dashboard macro strip (`/api/dashboard/macro`): Gift Nifty proxy, India VIX (NSE/Yahoo), US (Dow/Nasdaq/S&P), Asian indices, WTI/Brent crude, DXY, USDINR; this-week economic highlights (Fed/CPI/GDP/NFP/RBI when present); today’s news via Google/Yahoo RSS. Free unofficial APIs — no paid keys. News/events show heuristic **BULL / BEAR / MIXED** bias pills (keyword + print-vs-forecast; labeled experimental). Macro quotes auto-refresh ~15s (LIVE badge; pauses when tab hidden).
+- Market session hours (`marketHours.ts`): IST open/closed for dashboard + macro quote ids; gold ● when open; ~30s UI tick; heuristic regular sessions only (no holiday calendar) — see §7.1.
+- Dashboard macro strip (`/api/dashboard/macro`): Gift Nifty proxy, India VIX (NSE/Yahoo), US (Dow/Nasdaq/S&P), Asian indices, WTI/Brent crude, DXY, USDINR; this-week economic highlights (Fed/CPI/GDP/NFP/RBI when present); today’s news via Google/Yahoo RSS. Free unofficial APIs — no paid keys. News/events show heuristic **BULL / BEAR / MIXED** bias pills (keyword + print-vs-forecast; labeled experimental). Macro quotes auto-refresh ~15s (LIVE badge; pauses when tab hidden). Macro tiles reuse the same session-hours labels / open-state styling as index cards.
+- Stage 6 track-record UI polish: `BacktestPanel` error state + retry; `ChartAiLoader` dedicated loading variant for track-record charts.
 - Paper option chain: live NSE India OC for NIFTY/BANKNIFTY (Call/Put LTP + OI + % change) + SENSEX via Angel; **Angel SmartAPI WebSocket SnapQuote** for ATM ±10 CE/PE (`setOptionSubscriptions` on shared `websocketFeed`, `liveOptionChainHub`, SSE `/api/paper/chain/stream`); REST snapshot ~20s when WS live / ~2s fallback; spot marker from dashboard index SSE; Groww-style ATM divider.
 - Analysis index drivers heatmap (`IndexDriversHeatmap` / `/api/analysis/heatmap`) — top-weight Nifty / Bank Nifty / Sensex names; **est. contribution pts** = `weight% × day% × indexLevel / 10000` (approx weights, not live NSE free-float); cell color = day %; sorted by |points|
 
 ### Not Yet
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
+- Exchange holiday calendar for session open/closed (current `marketHours` is weekday + regular hours only)
 - TimescaleDB hypertables for long-horizon IV / candle history (scalp candles use Postgres `MarketCandle` for now; IV trend still live + candle-derived proxy)
 - Upstash Redis pub/sub for scalp second-level polling
 - Multi-instance Redis fan-out for Angel option/index ticks (single-process in-memory hubs today); full-chain (non-ATM) WebSocket subscribe
