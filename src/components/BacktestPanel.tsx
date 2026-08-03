@@ -1,5 +1,6 @@
 "use client";
 
+import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { useEffect, useState } from "react";
 
 type Cohort = {
@@ -39,15 +40,60 @@ type TrackPayload = {
 
 export function BacktestPanel() {
   const [data, setData] = useState<TrackPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     void fetch("/api/backtest")
-      .then((r) => r.json())
-      .then(setData);
+      .then(async (r) => {
+        const json = (await r.json()) as TrackPayload | { error?: string };
+        if (cancelled) return;
+        if (!r.ok || !("currentVersion" in json)) {
+          setError(
+            "error" in json && json.error
+              ? json.error
+              : "Failed to load track record",
+          );
+          return;
+        }
+        setData(json);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load track record");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  if (error) {
+    return (
+      <p className="rounded-md border border-binance-bear/40 bg-binance-bear/10 px-3 py-2 text-sm text-binance-bear">
+        {error}
+      </p>
+    );
+  }
+
   if (!data) {
-    return <p className="text-sm text-binance-muted">Loading track record…</p>;
+    return (
+      <div className="space-y-4">
+        <section>
+          <h1 className="text-xl font-semibold text-binance-gold sm:text-2xl">
+            Track Record
+          </h1>
+          <p className="mt-2 text-xs text-binance-muted sm:text-sm">
+            Time-ordered validation cohorts · experimental / unvalidated
+          </p>
+        </section>
+        <ChartAiLoader
+          label="Track record"
+          variant="track"
+          overlay={false}
+        />
+      </div>
+    );
   }
 
   return (

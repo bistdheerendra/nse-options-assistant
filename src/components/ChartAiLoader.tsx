@@ -3,13 +3,13 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState } from "react";
 
-type Variant = "chart" | "chain" | "synthesis";
+type Variant = "chart" | "chain" | "synthesis" | "track";
 
 type Props = {
   /** Shown under the main status line, e.g. BANKNIFTY */
   label?: string;
   compact?: boolean;
-  /** chart = candles; chain = option-grid; synthesis = lane run */
+  /** chart = candles; chain = option-grid; synthesis = lane run; track = track record */
   variant?: Variant;
   /** Fill a sized parent (absolute inset-0). Default true. */
   overlay?: boolean;
@@ -30,6 +30,11 @@ const STATUS_BY_VARIANT: Record<Variant, string[]> = {
     "Running lane analysis…",
     "Scoring technical + flow…",
     "Synthesizing IV-aware structure…",
+  ],
+  track: [
+    "Loading outcomes…",
+    "Computing win rates…",
+    "Building cohort stats…",
   ],
 };
 
@@ -59,7 +64,9 @@ export function ChartAiLoader({
       ? "Option chain"
       : variant === "synthesis"
         ? "Synthesis"
-        : "Chart";
+        : variant === "track"
+          ? "Track record"
+          : "Chart";
 
   return (
     <div
@@ -173,7 +180,7 @@ export function ChartAiLoader({
               </motion.div>
             ))}
           </div>
-        ) : (
+        ) : variant === "synthesis" ? (
           /* Synthesis — pulsing lane score bars */
           <div className="flex w-48 flex-col gap-2" aria-hidden>
             {["Technical", "Flow", "Sentiment", "Macro"].map((lane, i) => (
@@ -192,6 +199,23 @@ export function ChartAiLoader({
                   />
                 </div>
               </div>
+            ))}
+          </div>
+        ) : (
+          /* Track record — cohort cards shimmer */
+          <div className="grid w-56 grid-cols-2 gap-2" aria-hidden>
+            {[0, 1, 2, 3].map((i) => (
+              <motion.div
+                key={i}
+                className="h-12 rounded-md border border-binance-border bg-binance-elevated"
+                animate={{ opacity: [0.35, 0.9, 0.35] }}
+                transition={{
+                  duration: 1.5,
+                  repeat: Infinity,
+                  ease: "easeInOut",
+                  delay: i * 0.12,
+                }}
+              />
             ))}
           </div>
         )}
