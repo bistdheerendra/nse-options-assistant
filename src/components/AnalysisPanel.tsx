@@ -1,6 +1,7 @@
 "use client";
 
 import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
+import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
 import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
@@ -464,6 +465,14 @@ export function AnalysisPanel() {
       )}
 
       <IndexDriversHeatmap underlying={underlying} />
+
+      {loading && (
+        <ChartAiLoader
+          label={`${underlying} synthesis`}
+          variant="synthesis"
+          overlay={false}
+        />
+      )}
 
       {data && (
         <motion.div

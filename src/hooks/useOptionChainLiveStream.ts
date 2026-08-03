@@ -36,6 +36,7 @@ export function useOptionChainLiveStream(underlying: string) {
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  const [loading, setLoading] = useState(true);
   const hasDataRef = useRef(false);
 
   useEffect(() => {
@@ -48,6 +49,7 @@ export function useOptionChainLiveStream(underlying: string) {
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     setLive(false);
     setError(null);
     setContracts([]);
@@ -76,9 +78,11 @@ export function useOptionChainLiveStream(underlying: string) {
           setSubscribedTokens(payload.subscribedTokens);
           setLive(true);
           setError(null);
+          setLoading(false);
         } else {
           setLive(false);
           setError(payload.uiHint ?? payload.error);
+          setLoading(false);
         }
       } catch {
         // ignore malformed frames
@@ -96,6 +100,7 @@ export function useOptionChainLiveStream(underlying: string) {
       setLive(false);
       if (es.readyState === EventSource.CLOSED) {
         setError("Option chain stream disconnected");
+        if (!hasDataRef.current) setLoading(false);
       }
     };
 
@@ -126,6 +131,7 @@ export function useOptionChainLiveStream(underlying: string) {
     feed,
     subscribedTokens,
     live,
+    loading,
     error,
     fetchedAt,
     reconnect,

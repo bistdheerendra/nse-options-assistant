@@ -1,5 +1,6 @@
 "use client";
 
+import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { LiveBadge } from "@/components/LiveBadge";
 import {
   SCALP_CHART_TFS,
@@ -15,9 +16,10 @@ import {
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type LogicalRange,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 type Underlying = "NIFTY" | "BANKNIFTY" | "SENSEX";
@@ -64,11 +66,127 @@ type Props = {
   levels?: ChartTradeLevels | null;
   /** Optional stop-loss cluster horizontals (Scalp Stage 5). */
   clusterLevels?: ChartClusterLevel[] | null;
+  /** Multi-chart page: shorter panel, no trade-plan footer copy. */
+  compact?: boolean;
 };
 
 const REFRESH_MS = 30_000;
 /** Reject live patch if LTP is far from last close (wrong series / stale mock). */
 const MAX_LIVE_GAP_PCT = 0.005; // 0.5%
+
+type ChartViewState = {
+  logical: { from: number; to: number };
+  price: { from: number; to: number } | null;
+  autoScale: boolean;
+};
+
+function chartViewKey(
+  underlying: Underlying,
+  mode: "SCALP" | "SWING",
+  tf: string,
+): string {
+  return `nse-chart-view:${underlying}:${mode}:${tf}`;
+}
+
+function readChartView(key: string): ChartViewState | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ChartViewState;
+    if (
+      !parsed?.logical ||
+      !Number.isFinite(parsed.logical.from) ||
+      !Number.isFinite(parsed.logical.to)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeChartView(key: string, state: ChartViewState) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(state));
+  } catch {
+    // private mode / quota — ignore
+  }
+}
+
+function clearChartView(key: string) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
+/** Reject saved Y-zoom that belongs to a different index (e.g. Nifty ~24k on Bank Nifty ~57k). */
+function savedPriceMatchesBars(
+  price: { from: number; to: number } | null | undefined,
+  bars: CandlestickData[],
+): boolean {
+  if (!price || bars.length === 0) return true; // no locked Y → ok
+  if (
+    !Number.isFinite(price.from) ||
+    !Number.isFinite(price.to) ||
+    price.to <= price.from
+  ) {
+    return false;
+  }
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const b of bars) {
+    lo = Math.min(lo, b.low);
+    hi = Math.max(hi, b.high);
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return false;
+  // Must overlap data extent
+  if (price.to < lo || price.from > hi) return false;
+  const dataMid = (lo + hi) / 2;
+  const viewMid = (price.from + price.to) / 2;
+  const basis = Math.abs(dataMid) || 1;
+  // Nifty vs Bank Nifty mids differ by ~50%+ — reject anything >8% off
+  return Math.abs(viewMid - dataMid) / basis <= 0.08;
+}
+
+function resetChartViewToData(
+  chart: IChartApi,
+  series: ISeriesApi<"Candlestick">,
+) {
+  series.priceScale().setAutoScale(true);
+  chart.timeScale().fitContent();
+}
+
+function captureChartView(
+  chart: IChartApi,
+  series: ISeriesApi<"Candlestick">,
+): ChartViewState | null {
+  const logical = chart.timeScale().getVisibleLogicalRange();
+  if (!logical) return null;
+  const ps = series.priceScale();
+  return {
+    logical: { from: logical.from, to: logical.to },
+    price: ps.getVisibleRange(),
+    autoScale: ps.options().autoScale,
+  };
+}
+
+function applyChartView(
+  chart: IChartApi,
+  series: ISeriesApi<"Candlestick">,
+  state: ChartViewState,
+) {
+  chart.timeScale().setVisibleLogicalRange(state.logical as LogicalRange);
+  const ps = series.priceScale();
+  if (!state.autoScale && state.price) {
+    ps.setAutoScale(false);
+    ps.setVisibleRange(state.price);
+  } else {
+    ps.setAutoScale(true);
+  }
+}
 
 function toBar(c: CandleBar): CandlestickData {
   return {
@@ -106,6 +224,7 @@ export function AnalysisLiveChart({
   live,
   levels,
   clusterLevels,
+  compact = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -115,6 +234,11 @@ export function AnalysisLiveChart({
   const liveLtpRef = useRef(liveLtp);
   const levelsRef = useRef(levels);
   const clusterRef = useRef(clusterLevels);
+  /** True after first successful candle paint for current underlying/mode/tf. */
+  const viewInitializedRef = useRef(false);
+  /** Skip session writes while we programmatically restore zoom. */
+  const applyingViewRef = useRef(false);
+  const viewKeyRef = useRef("");
   liveLtpRef.current = liveLtp;
   levelsRef.current = levels;
   clusterRef.current = clusterLevels;
@@ -128,6 +252,9 @@ export function AnalysisLiveChart({
   const [scalpTf, setScalpTf] = useState<ScalpChartTf>("5m");
   const [tfLabel, setTfLabel] = useState(mode === "SCALP" ? "5m" : "1h");
   const [displayLtp, setDisplayLtp] = useState<number | null>(liveLtp);
+
+  const activeTf = mode === "SCALP" ? scalpTf : "1h";
+  viewKeyRef.current = chartViewKey(underlying, mode, activeTf);
 
   // Reset default TF when switching Scalp ↔ Swing
   useEffect(() => {
@@ -250,7 +377,20 @@ export function AnalysisLiveChart({
     seriesRef.current = series;
     paintPriceLines(series, levelsRef.current, clusterRef.current);
 
+    const persistView = () => {
+      if (applyingViewRef.current || !viewInitializedRef.current) return;
+      const state = captureChartView(chart, series);
+      if (!state) return;
+      writeChartView(viewKeyRef.current, state);
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange(persistView);
+    el.addEventListener("pointerup", persistView);
+    el.addEventListener("wheel", persistView, { passive: true });
+
     return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(persistView);
+      el.removeEventListener("pointerup", persistView);
+      el.removeEventListener("wheel", persistView);
       linesRef.current = [];
       seriesRef.current = null;
       chartRef.current = null;
@@ -263,6 +403,14 @@ export function AnalysisLiveChart({
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // New series key → allow restore / fitContent once, then preserve view
+    viewInitializedRef.current = false;
+    const seriesKey = chartViewKey(
+      underlying,
+      mode,
+      mode === "SCALP" ? scalpTf : "1h",
+    );
+    viewKeyRef.current = seriesKey;
 
     const load = async () => {
       try {
@@ -282,9 +430,44 @@ export function AnalysisLiveChart({
         let bars = json.candles.map(toBar);
         const ltp = liveLtpRef.current;
         if (ltp != null) bars = applyLiveToLast(bars, ltp);
+
+        const chart = chartRef.current;
+        const series = seriesRef.current;
+        // Keep zoom / pan / Y-stretch across live refreshes — never fitContent again
+        const priorView =
+          viewInitializedRef.current && chart && series
+            ? captureChartView(chart, series)
+            : null;
+
         barsRef.current = bars;
-        seriesRef.current?.setData(bars);
-        chartRef.current?.timeScale().fitContent();
+        series?.setData(bars);
+
+        if (chart && series) {
+          applyingViewRef.current = true;
+          try {
+            if (priorView && savedPriceMatchesBars(priorView.price, bars)) {
+              applyChartView(chart, series, priorView);
+            } else {
+              const saved = readChartView(seriesKey);
+              if (
+                saved &&
+                savedPriceMatchesBars(saved.price, bars)
+              ) {
+                applyChartView(chart, series, saved);
+              } else {
+                if (saved) clearChartView(seriesKey);
+                resetChartViewToData(chart, series);
+              }
+              viewInitializedRef.current = true;
+            }
+          } finally {
+            // Defer so library range-change events from setVisible* settle first
+            requestAnimationFrame(() => {
+              applyingViewRef.current = false;
+            });
+          }
+        }
+
         setTfLabel(json.timeframeLabel);
         setDemoMode(json.demoMode);
         setCandleSource(json.source ?? null);
@@ -332,7 +515,11 @@ export function AnalysisLiveChart({
   }, [levels, clusterLevels]);
 
   return (
-    <div className="flex h-full min-h-72 flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface sm:min-h-105">
+    <div
+      className={`flex h-full flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface ${
+        compact ? "min-h-120 sm:min-h-140" : "min-h-112 sm:min-h-105"
+      }`}
+    >
       <div className="flex flex-wrap items-center gap-2 border-b border-binance-border px-3 py-2.5 sm:px-4 sm:py-3">
         <p className="text-xs font-semibold uppercase tracking-wider text-binance-muted">
           Live chart
@@ -380,10 +567,7 @@ export function AnalysisLiveChart({
         <div ref={containerRef} className="absolute inset-0" />
 
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-binance-surface/70 text-sm text-binance-muted">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Loading candles…
-          </div>
+          <ChartAiLoader label={underlying} compact={compact} />
         )}
 
         {error && !loading && (
@@ -396,19 +580,21 @@ export function AnalysisLiveChart({
         )}
       </div>
 
-      <p className="border-t border-binance-border px-4 py-2 text-[11px] text-binance-muted">
-        {candleSource === "yahoo"
-          ? "Yahoo public OHLC · forming bar synced to live spot when within 0.5%"
-          : candleSource === "angel"
-            ? "Angel One OHLC · forming bar synced to live spot when within 0.5%"
-            : demoMode
-              ? "Public OHLC · live spot sync"
-              : "Live OHLC"}
-        {" · "}
-        {mode === "SCALP" ? "3m / 5m / 15m pills · " : "1h · "}
-        Entry / SL / TP dashed when synthesis is run
-        {" · "}Scalp SL-clusters: blue support / violet resistance
-      </p>
+      {!compact && (
+        <p className="border-t border-binance-border px-4 py-2 text-[11px] text-binance-muted">
+          {candleSource === "yahoo"
+            ? "Yahoo public OHLC · forming bar synced to live spot when within 0.5%"
+            : candleSource === "angel"
+              ? "Angel One OHLC · forming bar synced to live spot when within 0.5%"
+              : demoMode
+                ? "Public OHLC · live spot sync"
+                : "Live OHLC"}
+          {" · "}
+          {mode === "SCALP" ? "3m / 5m / 15m pills · " : "1h · "}
+          Entry / SL / TP dashed when synthesis is run
+          {" · "}Scalp SL-clusters: blue support / violet resistance
+        </p>
+      )}
     </div>
   );
 }

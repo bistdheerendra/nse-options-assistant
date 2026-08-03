@@ -1,5 +1,6 @@
 "use client";
 
+import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { LiveBadge } from "@/components/LiveBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { SpotPriceMarker } from "@/components/SpotPriceMarker";
@@ -11,7 +12,7 @@ import {
   unrealizedPnl,
 } from "@/lib/paperTrading/pnl";
 import { theme } from "@/lib/theme";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -427,6 +428,8 @@ export function PaperTradingPanel() {
     feed: chainFeed,
     subscribedTokens,
     live: chainLive,
+    loading: chainLoading,
+    error: chainError,
     fetchedAt: chainUpdatedAt,
     reconnect: reconnectChain,
   } = useOptionChainLiveStream(underlying);
@@ -806,8 +809,31 @@ export function PaperTradingPanel() {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,400px)] lg:items-start">
         <div
           ref={chainScrollRef}
-          className="max-h-[min(560px,65vh)] overflow-auto rounded-lg border border-binance-border bg-binance-surface"
+          className="relative max-h-[min(560px,65vh)] min-h-80 overflow-auto rounded-lg border border-binance-border bg-binance-surface"
         >
+          {chainLoading && (
+            <ChartAiLoader
+              label={`${underlying} chain`}
+              variant="chain"
+            />
+          )}
+          {!chainLoading && chainError && contracts.length === 0 && (
+            <div className="absolute inset-0 z-40 flex items-center justify-center bg-binance-surface/90 p-4">
+              <p className="inline-flex max-w-sm items-start gap-2 text-sm text-binance-bear">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>
+                  {chainError}
+                  <button
+                    type="button"
+                    onClick={() => reconnectChain()}
+                    className="ml-2 text-binance-gold underline-offset-2 hover:underline"
+                  >
+                    Retry
+                  </button>
+                </span>
+              </p>
+            </div>
+          )}
           <table className="min-w-full text-left text-xs">
             <thead className="sticky top-0 z-30 bg-binance-elevated text-binance-muted">
               <tr>

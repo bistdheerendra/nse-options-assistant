@@ -249,7 +249,7 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 
 | Viewport | Nav | Notes |
 |----------|-----|-------|
-| Mobile (`< md`) | Fixed bottom tabs (`MobileBottomNav`: Home / Analysis / Paper / Record) | Compact sticky header (“NSE Options”), safe-area insets, footer hidden, app-like padding under tabs |
+| Mobile (`< md`) | Fixed bottom tabs (`MobileBottomNav`: Home / Analysis / Chart / Paper / Record) | Compact sticky header (“NSE Options”), safe-area insets, footer hidden, app-like padding under tabs |
 | Desktop (`≥ md`) | Top header links | Footer disclaimer visible |
 
 Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts` / `binance-*` Tailwind).
@@ -278,6 +278,7 @@ Theme tokens only — no hardcoded Binance hex in components (`src/lib/theme.ts`
 - Stage 3: Directional + structure synthesis, TradeIdea model, analysis UI
 - Stage 3.1: Synthesized verdict card — ATR trade plan (Entry/SL/TP1/TP2 + R:R), regime (TRENDING/CHOPPY/VOLATILE), lane alignment, experimental edge from track-record (no ML), Mark as taken → paper
 - Stage 3.2: Analysis **50/50** layout — verdict left, live candlestick chart right (`AnalysisLiveChart` / `lightweight-charts`). Candles from `/api/analysis/candles` (prefer Yahoo timed OHLC so series matches live spot; Angel when available / non-demo). **Scalp chart TF pills: 3m / 5m / 15m** (`?tf=`); 3m via Yahoo 1m→3m aggregate when native 3m absent. Swing stays 1h. Forming bar patched from dashboard SSE LTP only when within **0.5%** of last close. Dashed Entry / SL / TP1 / TP2 price lines after synthesis. UI default mode **Scalp**.
+- Chart tab (`/chart`, header + mobile nav): `ChartsPanel` shows **NIFTY + BANKNIFTY + SENSEX** live candlesticks together (3-up on xl, stacked on smaller). Shared Scalp/Swing mode; same `/api/analysis/candles` + dashboard SSE LTP path as Analysis.
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror); open positions show duration + premium TP/SL; auto-close on TP/SL hit → Closed table with status reason
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI

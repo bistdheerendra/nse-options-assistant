@@ -4,6 +4,7 @@ import {
   BarChart3,
   CandlestickChart,
   LayoutDashboard,
+  LineChart,
   Wallet,
 } from "lucide-react";
 import Link from "next/link";
@@ -12,6 +13,7 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { href: "/", label: "Home", icon: LayoutDashboard },
   { href: "/analysis", label: "Analysis", icon: CandlestickChart },
+  { href: "/chart", label: "Chart", icon: LineChart },
   { href: "/paper", label: "Paper", icon: Wallet },
   { href: "/backtest", label: "Record", icon: BarChart3 },
 ] as const;
@@ -29,7 +31,7 @@ export function MobileBottomNav() {
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
       aria-label="Primary"
     >
-      <ul className="mx-auto grid max-w-lg grid-cols-4 px-1 pt-1.5 pb-1">
+      <ul className="mx-auto grid max-w-lg grid-cols-5 px-1 pt-1.5 pb-1">
         {TABS.map(({ href, label, icon: Icon }) => {
           const active =
             href === "/" ? pathname === "/" : pathname.startsWith(href);

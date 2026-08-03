@@ -151,21 +151,69 @@ function countryLabel(code: string): string {
   return map[code] ?? code;
 }
 
+/** True when America/New_York is on daylight time (EDT). */
+function isUsEasternDaylightTime(date = new Date()): boolean {
+  const tz =
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      timeZoneName: "short",
+    })
+      .formatToParts(date)
+      .find((p) => p.type === "timeZoneName")?.value ?? "";
+  return tz.includes("DT");
+}
+
+/**
+ * Regular cash-session hours in IST, keyed by quote id.
+ * US equity: 9:30–16:00 ET → EDT 7:00 PM–1:30 AM · EST 8:00 PM–2:30 AM IST
+ */
+function hoursIstForQuote(id: string): string | null {
+  if (id === "VIX" || id === "DJI" || id === "IXIC" || id === "GSPC") {
+    return isUsEasternDaylightTime()
+      ? "7:00 PM – 1:30 AM IST"
+      : "8:00 PM – 2:30 AM IST";
+  }
+  const map: Record<string, string> = {
+    GIFTNIFTY: "6:30 AM – 2:45 AM IST",
+    INDIAVIX: "9:15 AM – 3:30 PM IST",
+    N225: "5:30 AM – 11:30 AM IST",
+    HSI: "7:00 AM – 1:30 PM IST",
+    SSEC: "7:00 AM – 12:30 PM IST",
+    KS11: "5:30 AM – 12:00 PM IST",
+    STI: "6:30 AM – 2:30 PM IST",
+    CL: "Nearly 24h (CME)",
+    BZ: "Nearly 24h (ICE)",
+    DXY: "Nearly 24h (ICE)",
+    USDINR: "9:00 AM – 5:00 PM IST",
+  };
+  return map[id] ?? null;
+}
+
 function QuoteTile({ q }: { q: MacroQuote }) {
   const up = q.change >= 0;
   const changeColor = up ? theme.colors.bull : theme.colors.bear;
+  const hoursIst = hoursIstForQuote(q.id);
   return (
     <div className="rounded-lg border border-binance-border bg-binance-elevated px-3 py-2.5">
       <div className="flex items-start justify-between gap-2">
         <p className="text-xs text-binance-muted">{q.label}</p>
         {q.country ? (
-          <span className="shrink-0 text-[10px] text-binance-muted">
-            {q.country}
-          </span>
+          <div className="shrink-0 text-right">
+            <p className="text-[10px] text-binance-muted">{q.country}</p>
+            {hoursIst ? (
+              <p className="mt-0.5 text-[10px] leading-tight text-binance-muted">
+                {hoursIst}
+              </p>
+            ) : null}
+          </div>
         ) : q.note ? (
           <span className="text-[9px] uppercase tracking-wide text-binance-muted">
             Proxy
           </span>
+        ) : hoursIst ? (
+          <p className="shrink-0 text-right text-[10px] leading-tight text-binance-muted">
+            {hoursIst}
+          </p>
         ) : null}
       </div>
       <p className="mt-1 text-lg font-semibold tabular-nums text-binance-text">
