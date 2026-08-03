@@ -1,6 +1,10 @@
 "use client";
 
 import {
+  hoursIstForQuote,
+  isMarketOpenNow,
+} from "@/lib/marketdata/marketHours";
+import {
   biasFromEconomicEvent,
   biasFromHeadline,
   type MarketBias,
@@ -21,7 +25,7 @@ import {
   Newspaper,
   TrendingUp,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type MacroQuote = {
   id: string;
@@ -151,42 +155,31 @@ function countryLabel(code: string): string {
   return map[code] ?? code;
 }
 
-/** True when America/New_York is on daylight time (EDT). */
-function isUsEasternDaylightTime(date = new Date()): boolean {
-  const tz =
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      timeZoneName: "short",
-    })
-      .formatToParts(date)
-      .find((p) => p.type === "timeZoneName")?.value ?? "";
-  return tz.includes("DT");
+/** Re-render ~every 30s so open/closed session colors stay current. */
+function useSessionTick(ms = 30_000) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), ms);
+    return () => window.clearInterval(id);
+  }, [ms]);
 }
 
-/**
- * Regular cash-session hours in IST, keyed by quote id.
- * US equity: 9:30–16:00 ET → EDT 7:00 PM–1:30 AM · EST 8:00 PM–2:30 AM IST
- */
-function hoursIstForQuote(id: string): string | null {
-  if (id === "VIX" || id === "DJI" || id === "IXIC" || id === "GSPC") {
-    return isUsEasternDaylightTime()
-      ? "7:00 PM – 1:30 AM IST"
-      : "8:00 PM – 2:30 AM IST";
-  }
-  const map: Record<string, string> = {
-    GIFTNIFTY: "6:30 AM – 2:45 AM IST",
-    INDIAVIX: "9:15 AM – 3:30 PM IST",
-    N225: "5:30 AM – 11:30 AM IST",
-    HSI: "7:00 AM – 1:30 PM IST",
-    SSEC: "7:00 AM – 12:30 PM IST",
-    KS11: "5:30 AM – 12:00 PM IST",
-    STI: "6:30 AM – 2:30 PM IST",
-    CL: "Nearly 24h (CME)",
-    BZ: "Nearly 24h (ICE)",
-    DXY: "Nearly 24h (ICE)",
-    USDINR: "9:00 AM – 5:00 PM IST",
-  };
-  return map[id] ?? null;
+function HoursLabel({ id }: { id: string }) {
+  useSessionTick();
+  const hoursIst = hoursIstForQuote(id);
+  if (!hoursIst) return null;
+  const open = isMarketOpenNow(id);
+  return (
+    <p
+      className={`mt-0.5 text-[10px] leading-tight ${
+        open ? "font-semibold text-binance-gold" : "text-binance-muted"
+      }`}
+      title={open ? "Session open (IST)" : "Session closed (IST)"}
+    >
+      {open ? "● " : ""}
+      {hoursIst}
+    </p>
+  );
 }
 
 function QuoteTile({ q }: { q: MacroQuote }) {
@@ -200,20 +193,16 @@ function QuoteTile({ q }: { q: MacroQuote }) {
         {q.country ? (
           <div className="shrink-0 text-right">
             <p className="text-[10px] text-binance-muted">{q.country}</p>
-            {hoursIst ? (
-              <p className="mt-0.5 text-[10px] leading-tight text-binance-muted">
-                {hoursIst}
-              </p>
-            ) : null}
+            {hoursIst ? <HoursLabel id={q.id} /> : null}
           </div>
         ) : q.note ? (
           <span className="text-[9px] uppercase tracking-wide text-binance-muted">
             Proxy
           </span>
         ) : hoursIst ? (
-          <p className="shrink-0 text-right text-[10px] leading-tight text-binance-muted">
-            {hoursIst}
-          </p>
+          <div className="shrink-0 text-right">
+            <HoursLabel id={q.id} />
+          </div>
         ) : null}
       </div>
       <p className="mt-1 text-lg font-semibold tabular-nums text-binance-text">

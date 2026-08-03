@@ -2,6 +2,10 @@
 
 import { MiniCandleChart } from "@/components/MiniCandleChart";
 import { LiveBadge } from "@/components/LiveBadge";
+import {
+  hoursIstForQuote,
+  isMarketOpenNow,
+} from "@/lib/marketdata/marketHours";
 import { theme } from "@/lib/theme";
 import { Link2 } from "lucide-react";
 import Link from "next/link";
@@ -28,6 +32,15 @@ function formatPrice(n: number) {
   });
 }
 
+/** Re-render ~every 30s so open/closed session colors stay current. */
+function useSessionTick(ms = 30_000) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), ms);
+    return () => window.clearInterval(id);
+  }, [ms]);
+}
+
 export function IndexQuoteCard({
   card,
   live = true,
@@ -35,11 +48,14 @@ export function IndexQuoteCard({
   card: IndexCardData;
   live?: boolean;
 }) {
+  useSessionTick();
   const up = card.change >= 0;
   const changeColor = up ? theme.colors.bull : theme.colors.bear;
   const href = card.analysisUnderlying
     ? `/analysis?underlying=${card.analysisUnderlying}`
     : null;
+  const hoursIst = hoursIstForQuote(card.id);
+  const sessionOpen = isMarketOpenNow(card.id);
 
   const prevLtp = useRef(card.ltp);
   const [flash, setFlash] = useState<"up" | "down" | null>(null);
@@ -67,6 +83,19 @@ export function IndexQuoteCard({
           <h2 className="text-sm font-medium" style={{ color: theme.colors.text }}>
             {card.label}
           </h2>
+          {hoursIst ? (
+            <p
+              className={`mt-0.5 text-[10px] leading-tight ${
+                sessionOpen
+                  ? "font-semibold text-binance-gold"
+                  : "text-binance-muted"
+              }`}
+              title={sessionOpen ? "Session open (IST)" : "Session closed (IST)"}
+            >
+              {sessionOpen ? "● " : ""}
+              {hoursIst}
+            </p>
+          ) : null}
           {(card.demo || card.note) && (
             <p
               className="mt-0.5 text-[10px] uppercase tracking-wide"
