@@ -1,7 +1,10 @@
 "use client";
 
+import { LiveBadge } from "@/components/LiveBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { SpotPriceMarker } from "@/components/SpotPriceMarker";
+import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
+import { useOptionChainLiveStream } from "@/hooks/useOptionChainLiveStream";
 import {
   defaultPremiumTpSl,
   premiumExitHit,
@@ -398,11 +401,6 @@ export function PaperTradingPanel() {
     realizedPnl: number;
     totalPortfolioValue: number;
   } | null>(null);
-  const [contracts, setContracts] = useState<ChainContract[]>([]);
-  const [expiry, setExpiry] = useState("");
-  const [spot, setSpot] = useState<number | null>(null);
-  const [spotChange, setSpotChange] = useState(0);
-  const [spotChangePct, setSpotChangePct] = useState(0);
   const [selected, setSelected] = useState<ChainContract | null>(null);
   const [buyLots, setBuyLots] = useState(1);
   const [buyPct, setBuyPct] = useState(0);
@@ -415,10 +413,39 @@ export function PaperTradingPanel() {
   const [now, setNow] = useState(() => Date.now());
   const chainScrollRef = useRef<HTMLDivElement>(null);
   const spotMarkerRef = useRef<HTMLTableRowElement>(null);
-  /** Only auto-center spot once per underlying+expiry (not on 20s refresh). */
+  /** Only auto-center spot once per underlying+expiry (not on live refresh). */
   const centeredForKeyRef = useRef<string | null>(null);
   const selectedKeyRef = useRef<string | null>(null);
   const checkingExitsRef = useRef(false);
+
+  const {
+    contracts,
+    expiry,
+    spot: streamSpot,
+    spotChange,
+    spotChangePct,
+    feed: chainFeed,
+    subscribedTokens,
+    live: chainLive,
+    fetchedAt: chainUpdatedAt,
+    reconnect: reconnectChain,
+  } = useOptionChainLiveStream(underlying);
+
+  const { cards: liveCards, live: indexLive } = useDashboardLiveStream();
+  const liveSpot = useMemo(() => {
+    const card = liveCards.find((c) => c.id === underlying);
+    return card && Number.isFinite(card.ltp) ? card.ltp : null;
+  }, [liveCards, underlying]);
+
+  // Prefer index SSE spot when close to chain spot; else stream snapshot
+  const spot = useMemo(() => {
+    if (liveSpot == null) return streamSpot;
+    if (streamSpot == null) return liveSpot;
+    if (Math.abs(liveSpot - streamSpot) / Math.max(streamSpot, 1) > 0.005) {
+      return streamSpot;
+    }
+    return liveSpot;
+  }, [liveSpot, streamSpot]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/paper");
@@ -427,28 +454,19 @@ export function PaperTradingPanel() {
     setSummary(json.summary);
   }, []);
 
-  const loadChain = useCallback(async () => {
-    const res = await fetch(`/api/paper/chain?underlying=${underlying}`);
-    const json = await res.json();
-    const next: ChainContract[] = json.contracts ?? [];
-    setContracts(next);
-    setExpiry(json.expiry ?? "");
-    setSpot(typeof json.spot === "number" ? json.spot : null);
-    setSpotChange(Number(json.spotChange ?? 0));
-    setSpotChangePct(Number(json.spotChangePct ?? 0));
-
-    // Keep selection across refresh; clear only if contract vanished.
+  // Keep selection across tick patches; clear only if contract vanished.
+  useEffect(() => {
     const key = selectedKeyRef.current;
     if (!key) {
       setSelected(null);
-    } else {
-      const match = next.find(
-        (c) => c.tradingsymbol === key || c.symboltoken === key,
-      );
-      setSelected(match ?? null);
-      if (!match) selectedKeyRef.current = null;
+      return;
     }
-  }, [underlying]);
+    const match = contracts.find(
+      (c) => c.tradingsymbol === key || c.symboltoken === key,
+    );
+    setSelected(match ?? null);
+    if (!match) selectedKeyRef.current = null;
+  }, [contracts]);
 
   useEffect(() => {
     selectedKeyRef.current = null;
@@ -462,10 +480,7 @@ export function PaperTradingPanel() {
 
   useEffect(() => {
     void refresh();
-    void loadChain();
-    const id = window.setInterval(() => void loadChain(), 20_000);
-    return () => window.clearInterval(id);
-  }, [refresh, loadChain]);
+  }, [refresh]);
 
   // Live duration ticker (1s)
   useEffect(() => {
@@ -766,13 +781,24 @@ export function PaperTradingPanel() {
         <ModeToggle mode={mode} onChange={setMode} />
         <button
           type="button"
-          onClick={() => void loadChain()}
+          onClick={() => reconnectChain()}
           className="rounded border border-binance-border px-3 py-2 text-sm text-binance-muted hover:text-binance-text"
         >
           Refresh chain
         </button>
-        <span className="text-xs text-binance-muted">
-          Expiry {expiry || "—"} · live NSE refresh ~20s
+        <span className="inline-flex flex-wrap items-center gap-2 text-xs text-binance-muted">
+          <span>Expiry {expiry || "—"}</span>
+          <LiveBadge active={chainLive || indexLive} />
+          <span>
+            {chainFeed === "angel-ws"
+              ? `Angel WS · ATM ${subscribedTokens || "—"} tok`
+              : chainFeed === "demo"
+                ? "demo chain"
+                : "REST fallback"}
+            {chainUpdatedAt
+              ? ` · ${new Date(chainUpdatedAt).toLocaleTimeString("en-IN")}`
+              : ""}
+          </span>
         </span>
       </div>
 

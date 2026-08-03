@@ -87,6 +87,9 @@ export function useRelativeClock(iso: string | null, tickMs = 1000) {
 /** Index cards — near-real-time LTP (free APIs; not broker tick stream). */
 export const LIVE_INDEX_POLL_MS = 2_000;
 
+/** @deprecated Prefer `/api/paper/chain/stream` (Angel WS + REST). Kept for REST fallback cadence. */
+export const LIVE_CHAIN_POLL_MS = 2_000;
+
 /** Macro quotes / news — keep polite on free upstreams. */
 export const LIVE_MACRO_POLL_MS = 15_000;
 

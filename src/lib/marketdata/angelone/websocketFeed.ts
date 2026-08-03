@@ -6,10 +6,16 @@ const WS_URL = "wss://smartapisocket.angelone.in/smart-stream";
 const HEARTBEAT_MS = 25_000;
 const RECONNECT_BASE_MS = 1_500;
 const RECONNECT_MAX_MS = 30_000;
+
 /** Quote mode — LTP + OHLC/close so we can compute day change. */
 const MODE_QUOTE = 2;
-const EXCHANGE_NSE_CM = 1;
-const EXCHANGE_BSE_CM = 3;
+/** Snap quote — includes open interest (needed for option chain OI). */
+const MODE_SNAP_QUOTE = 3;
+
+export const EXCHANGE_NSE_CM = 1;
+export const EXCHANGE_NSE_FO = 2;
+export const EXCHANGE_BSE_CM = 3;
+export const EXCHANGE_BSE_FO = 4;
 
 export type AngelIndexTick = {
   underlying: Underlying;
@@ -21,7 +27,23 @@ export type AngelIndexTick = {
   receivedAt: number;
 };
 
+export type AngelOptionTick = {
+  token: string;
+  ltp: number;
+  prevClose: number;
+  volume?: number;
+  oi?: number;
+  exchangeTs: number;
+  receivedAt: number;
+};
+
+export type AngelTokenGroup = {
+  exchangeType: number;
+  tokens: string[];
+};
+
 type TickListener = (tick: AngelIndexTick) => void;
+type OptionTickListener = (tick: AngelOptionTick) => void;
 type StatusListener = (status: AngelFeedStatus) => void;
 
 export type AngelFeedStatus = "idle" | "connecting" | "live" | "error" | "demo";
@@ -38,19 +60,31 @@ function readToken(buf: Buffer): string {
   return slice.subarray(0, nul >= 0 ? nul : slice.length).toString("utf8");
 }
 
+type AngelBinaryTick = {
+  mode: number;
+  exchangeType: number;
+  token: string;
+  ltp: number;
+  prevClose: number;
+  volume?: number;
+  oi?: number;
+  exchangeTs: number;
+  receivedAt: number;
+};
+
 /**
  * Angel SmartAPI WS binary packet (little-endian).
- * Prices are paise → divide by 100 for equity/index.
- * LTP packet ends at 51 bytes; Quote continues through close at offset 115.
+ * Prices are paise → divide by 100 for equity/index/options premium.
+ * LTP @43; Quote close @115; SnapQuote OI @131 (contract count, not paise).
  */
-export function parseAngelQuotePacket(buf: Buffer): AngelIndexTick | null {
+export function parseAngelBinaryPacket(buf: Buffer): AngelBinaryTick | null {
   if (buf.length < 51) return null;
   const mode = buf.readInt8(0);
   if (mode !== 1 && mode !== 2 && mode !== 3) return null;
 
+  const exchangeType = buf.readUInt8(1);
   const token = readToken(buf);
-  const underlying = TOKEN_TO_UNDERLYING[token];
-  if (!underlying) return null;
+  if (!token) return null;
 
   // Docs label LTP as int32 but allocate 8 bytes — read as int64 paise.
   const ltpPaise = Number(buf.readBigInt64LE(43));
@@ -59,25 +93,56 @@ export function parseAngelQuotePacket(buf: Buffer): AngelIndexTick | null {
 
   const exchangeTs = Number(buf.readBigInt64LE(35));
   let prevClose = ltp;
+  let volume: number | undefined;
+  let oi: number | undefined;
+
+  if (buf.length >= 75) {
+    const vol = Number(buf.readBigInt64LE(67));
+    if (Number.isFinite(vol) && vol >= 0) volume = vol;
+  }
   if (buf.length >= 123) {
     const closePaise = Number(buf.readBigInt64LE(115));
     const close = closePaise / 100;
     if (Number.isFinite(close) && close > 0) prevClose = close;
   }
+  // Snap quote open_interest (int64 contracts)
+  if (buf.length >= 139) {
+    const rawOi = Number(buf.readBigInt64LE(131));
+    if (Number.isFinite(rawOi) && rawOi >= 0) oi = rawOi;
+  }
 
   return {
-    underlying,
+    mode,
+    exchangeType,
     token,
     ltp,
     prevClose,
+    volume,
+    oi,
     exchangeTs,
     receivedAt: Date.now(),
   };
 }
 
+/** Index-only parse (keeps scripts/tests that expect AngelIndexTick). */
+export function parseAngelQuotePacket(buf: Buffer): AngelIndexTick | null {
+  const raw = parseAngelBinaryPacket(buf);
+  if (!raw) return null;
+  const underlying = TOKEN_TO_UNDERLYING[raw.token];
+  if (!underlying) return null;
+  return {
+    underlying,
+    token: raw.token,
+    ltp: raw.ltp,
+    prevClose: raw.prevClose,
+    exchangeTs: raw.exchangeTs,
+    receivedAt: raw.receivedAt,
+  };
+}
+
 /**
- * Server-side Angel One SmartAPI WebSocket 2.0 feed for index LTP.
- * One shared connection per process; Gift Nifty is not on SmartAPI.
+ * Server-side Angel One SmartAPI WebSocket 2.0 feed.
+ * One shared connection: index LTP (Quote) + optional NFO/BFO option tokens (SnapQuote).
  */
 class AngelWebsocketFeed {
   private ws: WebSocket | null = null;
@@ -88,8 +153,13 @@ class AngelWebsocketFeed {
   private reconnectAttempt = 0;
   private intentionalClose = false;
   private latest = new Map<Underlying, AngelIndexTick>();
+  private latestOptions = new Map<string, AngelOptionTick>();
   private tickListeners = new Set<TickListener>();
+  private optionTickListeners = new Set<OptionTickListener>();
   private statusListeners = new Set<StatusListener>();
+  /** Active option token subscriptions (ATM band). */
+  private optionGroups: AngelTokenGroup[] = [];
+  private optionTokenSet = new Set<string>();
 
   getStatus(): AngelFeedStatus {
     return this.status;
@@ -101,7 +171,11 @@ class AngelWebsocketFeed {
     return out;
   }
 
-  /** Keep connection while ≥1 subscriber (dashboard hub). */
+  getLatestOptionTicks(): Map<string, AngelOptionTick> {
+    return new Map(this.latestOptions);
+  }
+
+  /** Keep connection while ≥1 subscriber (dashboard / option-chain hubs). */
   acquire(): () => void {
     this.refCount += 1;
     void this.ensureConnected();
@@ -116,10 +190,52 @@ class AngelWebsocketFeed {
     return () => this.tickListeners.delete(listener);
   }
 
+  onOptionTick(listener: OptionTickListener): () => void {
+    this.optionTickListeners.add(listener);
+    return () => this.optionTickListeners.delete(listener);
+  }
+
   onStatus(listener: StatusListener): () => void {
     this.statusListeners.add(listener);
     listener(this.status);
     return () => this.statusListeners.delete(listener);
+  }
+
+  /**
+   * Subscribe / replace NFO–BFO option tokens on the shared WS.
+   * Pass [] to clear. Uses SnapQuote (mode 3) for LTP + OI.
+   */
+  setOptionSubscriptions(groups: AngelTokenGroup[]) {
+    const normalized = groups
+      .map((g) => ({
+        exchangeType: g.exchangeType,
+        tokens: [...new Set(g.tokens.filter(Boolean))],
+      }))
+      .filter((g) => g.tokens.length > 0);
+
+    const prev = this.optionGroups;
+    this.optionGroups = normalized;
+    this.optionTokenSet = new Set(normalized.flatMap((g) => g.tokens));
+
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    if (prev.length) {
+      this.sendSubscribe(ws, {
+        correlationID: "optunsub01",
+        action: 0,
+        mode: MODE_SNAP_QUOTE,
+        tokenList: prev,
+      });
+    }
+    if (normalized.length) {
+      this.sendSubscribe(ws, {
+        correlationID: "optsub0001",
+        action: 1,
+        mode: MODE_SNAP_QUOTE,
+        tokenList: normalized,
+      });
+    }
   }
 
   private setStatus(next: AngelFeedStatus) {
@@ -176,6 +292,14 @@ class AngelWebsocketFeed {
         this.reconnectAttempt = 0;
         this.setStatus("live");
         this.subscribeIndices(ws);
+        if (this.optionGroups.length) {
+          this.sendSubscribe(ws, {
+            correlationID: "optsub0001",
+            action: 1,
+            mode: MODE_SNAP_QUOTE,
+            tokenList: this.optionGroups,
+          });
+        }
         this.startHeartbeat(ws);
       });
 
@@ -187,12 +311,45 @@ class AngelWebsocketFeed {
         const buf = Buffer.isBuffer(data)
           ? data
           : Buffer.from(data as ArrayBuffer);
-        const tick = parseAngelQuotePacket(buf);
-        if (!tick) return;
-        this.latest.set(tick.underlying, tick);
-        for (const l of this.tickListeners) {
+        const raw = parseAngelBinaryPacket(buf);
+        if (!raw) return;
+
+        const underlying = TOKEN_TO_UNDERLYING[raw.token];
+        if (underlying) {
+          const tick: AngelIndexTick = {
+            underlying,
+            token: raw.token,
+            ltp: raw.ltp,
+            prevClose: raw.prevClose,
+            exchangeTs: raw.exchangeTs,
+            receivedAt: raw.receivedAt,
+          };
+          this.latest.set(underlying, tick);
+          for (const l of this.tickListeners) {
+            try {
+              l(tick);
+            } catch {
+              // ignore
+            }
+          }
+          return;
+        }
+
+        if (!this.optionTokenSet.has(raw.token)) return;
+
+        const opt: AngelOptionTick = {
+          token: raw.token,
+          ltp: raw.ltp,
+          prevClose: raw.prevClose,
+          volume: raw.volume,
+          oi: raw.oi,
+          exchangeTs: raw.exchangeTs,
+          receivedAt: raw.receivedAt,
+        };
+        this.latestOptions.set(raw.token, opt);
+        for (const l of this.optionTickListeners) {
           try {
-            l(tick);
+            l(opt);
           } catch {
             // ignore
           }
@@ -219,28 +376,47 @@ class AngelWebsocketFeed {
     }
   }
 
+  private sendSubscribe(
+    ws: WebSocket,
+    args: {
+      correlationID: string;
+      action: 0 | 1;
+      mode: number;
+      tokenList: AngelTokenGroup[];
+    },
+  ) {
+    if (!args.tokenList.length) return;
+    ws.send(
+      JSON.stringify({
+        correlationID: args.correlationID,
+        action: args.action,
+        params: {
+          mode: args.mode,
+          tokenList: args.tokenList,
+        },
+      }),
+    );
+  }
+
   private subscribeIndices(ws: WebSocket) {
-    const payload = {
+    this.sendSubscribe(ws, {
       correlationID: "dash000001",
       action: 1,
-      params: {
-        mode: MODE_QUOTE,
-        tokenList: [
-          {
-            exchangeType: EXCHANGE_NSE_CM,
-            tokens: [
-              UNDERLYING_META.NIFTY.symboltoken,
-              UNDERLYING_META.BANKNIFTY.symboltoken,
-            ],
-          },
-          {
-            exchangeType: EXCHANGE_BSE_CM,
-            tokens: [UNDERLYING_META.SENSEX.symboltoken],
-          },
-        ],
-      },
-    };
-    ws.send(JSON.stringify(payload));
+      mode: MODE_QUOTE,
+      tokenList: [
+        {
+          exchangeType: EXCHANGE_NSE_CM,
+          tokens: [
+            UNDERLYING_META.NIFTY.symboltoken,
+            UNDERLYING_META.BANKNIFTY.symboltoken,
+          ],
+        },
+        {
+          exchangeType: EXCHANGE_BSE_CM,
+          tokens: [UNDERLYING_META.SENSEX.symboltoken],
+        },
+      ],
+    });
   }
 
   private startHeartbeat(ws: WebSocket) {
@@ -274,6 +450,9 @@ class AngelWebsocketFeed {
 
   private disconnect() {
     this.intentionalClose = true;
+    this.optionGroups = [];
+    this.optionTokenSet.clear();
+    this.latestOptions.clear();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
