@@ -66,6 +66,16 @@ type Props = {
   levels?: ChartTradeLevels | null;
   /** Optional stop-loss cluster horizontals (Scalp Stage 5). */
   clusterLevels?: ChartClusterLevel[] | null;
+  /**
+   * Optional SMC overlay horizontals (Stage 8) — theme.smc* colors only.
+   * Does not alter SL-cluster blue/violet rendering.
+   */
+  smcLevels?: Array<{
+    price: number;
+    color: string;
+    title: string;
+    style: "solid" | "dashed";
+  }> | null;
   /** Multi-chart page: shorter panel, no trade-plan footer copy. */
   compact?: boolean;
 };
@@ -224,6 +234,7 @@ export function AnalysisLiveChart({
   live,
   levels,
   clusterLevels,
+  smcLevels,
   compact = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -234,6 +245,7 @@ export function AnalysisLiveChart({
   const liveLtpRef = useRef(liveLtp);
   const levelsRef = useRef(levels);
   const clusterRef = useRef(clusterLevels);
+  const smcRef = useRef(smcLevels);
   /** True after first successful candle paint for current underlying/mode/tf. */
   const viewInitializedRef = useRef(false);
   /** Skip session writes while we programmatically restore zoom. */
@@ -242,6 +254,7 @@ export function AnalysisLiveChart({
   liveLtpRef.current = liveLtp;
   levelsRef.current = levels;
   clusterRef.current = clusterLevels;
+  smcRef.current = smcLevels;
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -273,6 +286,7 @@ export function AnalysisLiveChart({
     series: ISeriesApi<"Candlestick">,
     next: ChartTradeLevels | null | undefined,
     clusters?: ChartClusterLevel[] | null,
+    smc?: Props["smcLevels"],
   ) {
     clearPriceLines(series);
     if (next) {
@@ -326,6 +340,23 @@ export function AnalysisLiveChart({
         );
       }
     }
+    // SMC overlays (Stage 8): theme.smc* only — separate from SL-cluster colors
+    if (smc?.length) {
+      for (const s of smc.slice(0, 12)) {
+        if (!Number.isFinite(s.price)) continue;
+        linesRef.current.push(
+          series.createPriceLine({
+            price: s.price,
+            color: s.color,
+            lineWidth: 1,
+            lineStyle:
+              s.style === "dashed" ? LineStyle.Dashed : LineStyle.Solid,
+            axisLabelVisible: true,
+            title: s.title,
+          }),
+        );
+      }
+    }
   }
 
   // Create / destroy chart once
@@ -375,7 +406,12 @@ export function AnalysisLiveChart({
 
     chartRef.current = chart;
     seriesRef.current = series;
-    paintPriceLines(series, levelsRef.current, clusterRef.current);
+    paintPriceLines(
+      series,
+      levelsRef.current,
+      clusterRef.current,
+      smcRef.current,
+    );
 
     const persistView = () => {
       if (applyingViewRef.current || !viewInitializedRef.current) return;
@@ -506,13 +542,13 @@ export function AnalysisLiveChart({
     seriesRef.current.update(next[next.length - 1]!);
   }, [liveLtp]);
 
-  // Trade-plan + SL-cluster price lines
+  // Trade-plan + SL-cluster + SMC overlay price lines
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    paintPriceLines(series, levels, clusterLevels);
+    paintPriceLines(series, levels, clusterLevels, smcLevels);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- paintPriceLines is stable enough here
-  }, [levels, clusterLevels]);
+  }, [levels, clusterLevels, smcLevels]);
 
   return (
     <div

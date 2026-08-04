@@ -14,6 +14,14 @@
   --binance-border: #2b3139;
   --binance-cluster-support: #60a5fa;
   --binance-cluster-resistance: #c084fc;
+  --binance-smc-buyside: #22d3ee;
+  --binance-smc-sellside: #fb923c;
+  --binance-smc-ob-bull: #2dd4bf;
+  --binance-smc-ob-bear: #e879f9;
+  --binance-smc-fvg: #38bdf8;
+  --binance-smc-bos: #eab308;
+  --binance-smc-choch: #f472b6;
+  --binance-smc-eq: #94a3b8;
   /* Bottom tab bar (~56px) + home-indicator safe area on phones */
   --app-tab-bar: 3.75rem;
 }
@@ -32,6 +40,14 @@
   --color-binance-border: var(--binance-border);
   --color-binance-cluster-support: var(--binance-cluster-support);
   --color-binance-cluster-resistance: var(--binance-cluster-resistance);
+  --color-binance-smc-buyside: var(--binance-smc-buyside);
+  --color-binance-smc-sellside: var(--binance-smc-sellside);
+  --color-binance-smc-ob-bull: var(--binance-smc-ob-bull);
+  --color-binance-smc-ob-bear: var(--binance-smc-ob-bear);
+  --color-binance-smc-fvg: var(--binance-smc-fvg);
+  --color-binance-smc-bos: var(--binance-smc-bos);
+  --color-binance-smc-choch: var(--binance-smc-choch);
+  --color-binance-smc-eq: var(--binance-smc-eq);
   --font-sans: var(--font-ibm-plex-sans);
   --font-mono: var(--font-geist-mono);
 }

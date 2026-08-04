@@ -16,6 +16,12 @@
     "test:scalp-clusters": "tsx scripts/test-scalp-clusters.ts",
     "test:scalp-oi": "tsx scripts/test-scalp-oi-velocity.ts",
     "test:scalp-confirm": "tsx scripts/test-scalp-confirmation.ts",
+    "test:smc-structure": "tsx scripts/test-smc-structure.ts",
+    "test:smc-blocks": "tsx scripts/test-smc-blocks.ts",
+    "test:smc-fvg": "tsx scripts/test-smc-fvg.ts",
+    "test:smc-liquidity": "tsx scripts/test-smc-liquidity.ts",
+    "test:smc-zones": "tsx scripts/test-smc-zones.ts",
+    "test:smc-signal": "tsx scripts/test-smc-signal.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",
     "poll:scalp-candles": "tsx scripts/poll-scalp-candles.ts",
     "db:push": "prisma db push"

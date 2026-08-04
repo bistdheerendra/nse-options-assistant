@@ -42,6 +42,8 @@ On bearish + high/rising IV the UI still warns that put premium is rich (size sm
 
 **Note:** All four lanes (Technical, Options Flow, Macro, Sentiment) are live. Each lane's scoring remains rules-based / heuristic — not ML-validated — until Section 6 track-record evidence across regimes. UI default mode is **Scalp** (Analysis + Paper).
 
+**SMC is not part of this synthesizer.** The Smart Money Concepts engine (`## SMC Engine`, `src/lib/marketdata/smc/`) is **standalone / read-only** — it does **not** feed lane scores, `combinedScore`, structure branching, or paper trading. Do not treat SMC entry BUY/SELL as a §2.5 verdict.
+
 ### SCALP Technical raw-term weights (5m)
 
 | Term | Weight | Notes |
@@ -213,6 +215,8 @@ Combines Stages 2–7 into one card (TF confluence, pattern, volume role, liquid
 
 Actionable only when confirm=`confirmed` AND liquidity≠`fail` AND volume≠`disqualify` — still labeled heuristic.
 
+**SMC is separate.** Scalp Stage 8 (`scalpSignal` / `technicalBiasAdj`) is unrelated to the SMC engine. SMC (`## SMC Engine`) is **standalone / read-only**, has its own card (`SmcSignalCard`) and `GET /api/smc`, and does **not** adjust technical-lane scores or §2.5 weights.
+
 ### 3.1i Auto paper on actionable scalp
 
 **Opt-in** (default OFF): Analysis UI toggle **Auto paper on actionable scalp** (~60s poll while Scalp mode).  
@@ -221,6 +225,181 @@ Server: `POST/GET /api/cron/scalp-auto-paper` → `runScalpAutoPaper()` — pape
 Gates: `scalpSignal.actionable` + structure BUY/SELL + suggestedContract + no duplicate OPEN (same underlying/strike/CE|PE/action).  
 SELL also needs UI “Allow auto Sell/write” **or** `SCALP_AUTO_PAPER_ACK_SELL=true`.  
 `entrySnapshot.autoPaper=true` + scalp feature tags for track record.
+
+## SMC Engine
+
+Standalone **read-only** Smart Money Concepts module (`src/lib/marketdata/smc/`).  
+**Not wired into §2.5 synthesizer or paper trading** — ships independently until a separate task says otherwise. Heuristic / rules-based; UI must label accordingly when Stages 8+ surface verdicts.
+
+Shared types: `src/lib/marketdata/smc/types.ts` (all stage contracts).  
+Engine runner: `engine.ts` → `getSmcEngineResult` / `runSmcEngineSync`.  
+**Cache:** in-process TTL `SMC_RESULT_TTL_SEC = 45` (matches scalp MTF candle TTL), keyed by `smc:{mode}:{underlying}`. In-process only; **no Prisma persistence** this pass.  
+**API:** `GET /api/smc?underlying=NIFTY&mode=SCALP|SWING` — surfaces Stages 1–8 + overlay levels.
+
+**Degrade (engine-wide):** candle `source` is labeled `angel` | `demo` | `db_cache` | `unavailable`. Empty / failed fetches never invent structure — stages return empty lists + `signals[]` / `status: insufficient|deferred`. UI shows degraded badge when `degraded: true`.
+
+### SMC Stage 1 — Swing highs / lows
+
+**Module:** `src/lib/marketdata/smc/swingPoints.ts`
+
+Fractal swing detection — **only** place SMC swing detection lives. Stages 3–7 consume this `SwingPoint[]`; never re-detect.
+
+| Parameter | Value | Meaning |
+|-----------|------:|---------|
+| `SWING_LOOKBACK` | 2 | Half-window; bar i is swing high iff `high[i]` strictly exceeds ±2 neighbors (mirror for lows) |
+
+**Intentional divergence (not a bug):** scalp `priceAction` / `stopLossClusters` / technical lane use lookback=3 for different purposes. Do not merge or share swing logic with those modules — documented in the file header.
+
+**Degrade:** inherits candle source from caller; insufficient length → empty `swings` + signal (never fabricates pivots).
+
+**Test:** `npm run test:smc-structure`
+
+### SMC Stage 2 — Market structure (BOS / CHoCH / trend)
+
+**Module:** `src/lib/marketdata/smc/marketStructure.ts`
+
+| Concept | Rule |
+|---------|------|
+| Trend | Last 2 swing highs + 2 lows: HH+HL → bullish; LH+LL → bearish; else ranging (`STRUCTURE_EPS_PCT` = 0.02%) |
+| BOS | Close beyond last confirmed swing **with** trend |
+| CHoCH | Close beyond last confirmed swing **against** trend (first reversal sign) |
+| Confirmation lag | Swing usable only after `lookback` bars print after the pivot |
+
+**TF mapping**
+- Scalp external = `FIVE_MINUTE`; internal = `THREE_MINUTE` when candles provided
+- Swing external = `ONE_HOUR`; **internal = `deferred`** (option a — no dedicated Swing 15m feed yet). Do not reuse Scalp 15m opportunistically in this pass.
+
+BOS/CHoCH are labeled as **objective structural facts** (close-beyond-swing); downstream trade inference still carries the heuristic disclaimer.
+
+**Orchestrator:** `analyzeSmcStructure` / `buildSmcStructureInput` → `SmcStructureBundle`.
+
+**Degrade:** `status: insufficient` when too few candles/swings; Swing internal `status: deferred` + `statusNote` (not a data fabricate). Engine `source` / `degraded` from candles.
+
+**Test:** `npm run test:smc-structure`
+
+### SMC Stage 3 — Order Blocks / Breaker / Mitigation / Rejection
+
+**Module:** `src/lib/marketdata/smc/orderBlocks.ts`
+
+Consumes Stage-1 swings + Stage-2 BOS/CHoCH events — never re-detects structure.
+
+| Concept | Rule |
+|---------|------|
+| Order Block | Last opposite-color candle before the displacement that caused a BOS/CHoCH (bullish event → last bearish candle; bearish → last bullish). Zone = that candle’s high/low. |
+| Mitigation | Price re-enters OB range without closing through → `status: mitigated` + `mitigationTime` |
+| Breaker | Close through the zone → original `invalidated`; new opposite-polarity `*_breaker` zone tracked from invalidation bar forward |
+| Rejection Block | At a Stage-1 swing, wick ≥ `REJECTION_WICK_RATIO` (2×) body; no BOS required; `lowerConfidence: true` |
+
+Statuses: `fresh` \| `mitigated` \| `invalidated`. Heuristic / rules-based — not ML-validated.
+
+**Degrade:** no candles / no events → empty `zones` + signals; missing opposite-color origin logged in `signals[]` (no invented OB).
+
+**Test:** `npm run test:smc-blocks`
+
+### SMC Stage 4 — Fair Value Gaps / Displacement / Imbalance
+
+**Module:** `src/lib/marketdata/smc/fairValueGaps.ts`
+
+| Concept | Rule |
+|---------|------|
+| FVG (`kind: "fvg"`) | Strict 3-candle gap: bullish when `c1.high < c3.low` (zone `[c1.high, c3.low]`); bearish when `c1.low > c3.high`. Origin = middle candle. |
+| Displacement | Middle (or tested) candle body ≥ `DISPLACEMENT_ATR_MULT` (1.5) × ATR(14). Helper `isDisplacementCandle` exported for Stage 7 reuse. |
+| Imbalance (`kind: "imbalance"`) | Single-candle only: body/range ≥ `IMBALANCE_BODY_RATIO` (0.7) **and** volume > rolling avg of prior 20 bars (`VOLUME_LOOKBACK`). Not duplicated when the bar is already an FVG middle. |
+| Fill | Subsequent re-entry into the gap → `fillPercent` ∈ [0,1]; `filled` when ≥ 1. |
+
+**Do not conflate:** FVG is the strict 3-candle subset; imbalance is the looser volume-confirmed single-candle form. UI must surface `kind` explicitly.
+
+Heuristic / rules-based — not ML-validated.
+
+**Degrade:** `<3` candles → empty gaps + signal; ATR-short history → `displacementCandle: false` (never fakes displacement).
+
+**Test:** `npm run test:smc-fvg`
+
+### SMC Stage 5 — Liquidity Zones / Sweeps / Equal Highs-Lows
+
+**Module:** `src/lib/marketdata/smc/smcLiquidity.ts`  
+**Not** `scalp/liquidity.ts` (bid/ask gate) — different concept, zero collision.
+
+Consumes Stage-1 `SwingPoint[]` only — never re-detects swings.
+
+| Concept | Rule |
+|---------|------|
+| Equal highs/lows | ≥2 swings within `EQUAL_LEVEL_TOLERANCE` (0.05% of price, same band as SL-cluster merge) |
+| Buy-side | Liquidity pool at/above equal highs (zone price = max of cluster) |
+| Sell-side | Liquidity pool at/below equal lows (zone price = min of cluster) |
+| Sweep | Wick through level, close back opposite within `SWEEP_CONFIRM_BARS` (2) → `swept: true` + `sweepTime` |
+
+Heuristic / rules-based — not ML-validated.
+
+**Degrade:** no Stage-1 swings → empty zones + signal; never invents equal levels or sweeps.
+
+**Test:** `npm run test:smc-liquidity` (distinct from `test:scalp-liquidity`)
+
+### SMC Stage 6 — Premium / Discount (equilibrium)
+
+**Module:** `src/lib/marketdata/smc/premiumDiscount.ts`
+
+| Concept | Rule |
+|---------|------|
+| Major leg | Last Stage-1 swing high + last swing low (earlier→later). Low→high or high→low. |
+| Equilibrium | 50% of `[rangeLow, rangeHigh]` |
+| Premium | Upper half (sell-bias *context*) |
+| Discount | Lower half (buy-bias *context*) |
+| Equilibrium band | Within `EQUILIBRIUM_BAND_PCT` (2% of leg range) of the mid → `equilibrium` |
+
+**Annotation only** — `annotationOnly: true`; never flips a trade decision alone (same spirit as “Lanes disagree”). Consumes Stage-1 swings only.
+
+Heuristic / rules-based — not ML-validated.
+
+**Degrade:** missing high+low swings or empty candles → `null` model (caller / Stage 8 treats as unavailable checklist fail), not a fabricated zone.
+
+**Test:** `npm run test:smc-zones` (Stages 6–7)
+
+### SMC Stage 7 — Supply / Demand Zones
+
+**Module:** `src/lib/marketdata/smc/supplyDemand.ts`
+
+Distinct from Order Blocks: S/D = consolidation **base** (1–3 quiet candles) immediately before a Stage-4 displacement; OB = last opposite-color candle before BOS/CHoCH.
+
+| Concept | Rule |
+|---------|------|
+| Base candle | body/range ≤ `SD_BASE_BODY_RATIO` (0.45) **or** range ≤ `SD_BASE_RANGE_ATR_MULT` (0.7) × ATR(14) |
+| Base length | 1–`SD_BASE_MAX_CANDLES` (3) consecutive, ending at bar before displacement |
+| Displacement | Reuses `isDisplacementCandle` (body ≥ 1.5 × ATR(14)) |
+| Demand | Bullish displacement away from base |
+| Supply | Bearish displacement away from base |
+| Status | `fresh` → `tested` (re-enter, no close-through) → `broken` (close through) — same mitigation spirit as OBs |
+
+Heuristic / rules-based — not ML-validated.
+
+**Degrade:** insufficient history / no displacement+base stack → empty `zones` + signals (common on quiet/demo series); never invents bases.
+
+**Test:** `npm run test:smc-zones`
+
+### SMC Stage 8 — Signal synthesis (read-only)
+
+**Modules:** `src/lib/marketdata/smc/smcSignal.ts` · `engine.ts` · `overlays.ts`  
+**UI:** `src/components/analysis/SmcSignalCard.tsx` · `SmcChartOverlaysLegend`  
+**API:** `GET /api/smc?underlying=NIFTY&mode=SCALP|SWING`
+
+Standalone confluence stack — **not** wired into §2.5 synthesizer or paper trading (ask before either follow-up). Distinct from §3.1h `scalpSignal`.
+
+| Entry | Requires all four checklist keys |
+|-------|----------------------------------|
+| BUY | BOS/CHoCH bullish + fresh bullish OB or demand + price in **discount** + no unswept buyside above spot |
+| SELL | BOS/CHoCH bearish + fresh bearish OB or supply + price in **premium** + no unswept sellside below spot |
+| NONE | Any checklist fail (or both sides pass — ambiguous) |
+
+Exit hints: opposite CHoCH · OB mitigated/invalidated · next liquidity · equilibrium.
+
+**Overlay tokens** (Binance-adjacent; ≠ SL-cluster blue/violet):  
+`smcBuysideLiq` cyan · `smcSellsideLiq` orange · `smcOrderBlockBull` teal · `smcOrderBlockBear` fuchsia · `smcFvg` sky · `smcBos` yellow (pending distinct-from-gold review) · `smcChoch` pink · `smcEquilibrium` slate.
+
+Every signal carries disclaimer: *Heuristic / rules-based, not ML-validated.*
+
+**Degrade:** propagates engine `source` / `degraded` / `degradeReasons`; checklist fails closed (NONE) when upstream stages empty — never auto-wires paper.
+
+**Test:** `npm run test:smc-signal`
 
 ## 4. Paper trading
 
@@ -320,6 +499,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - SCALP fast EMA10/20 momentum term (`FAST_EMA_TERM_WEIGHT = 0.20`) on same 5m series; EMA50/200 SCALP base weight 0.35 → 0.25 (`EMA_STACK_SCALP_WEIGHT`); SWING stays 50/200 only at 0.35
 - SCALP Analysis UI: “Lanes disagree — Technical vs Options Flow” badge on NEUTRAL/NO_TRADE when Tech vs OF opposite signs and |Δ| > 0.4 (context only — still NO_TRADE)
 - Scalp auto-paper (opt-in): UI toggle + `/api/cron/scalp-auto-paper` opens paper when rule stack cleared; dedupe OPEN; sell ack required; paper only
+- SMC Stages 1–8 (standalone/read-only, **not** in §2.5): full pipeline through `smcSignal` + `GET /api/smc` + `SmcSignalCard` / overlay legend + theme.smc* tokens; TTL 45s; `test:smc-structure` … `test:smc-signal`
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
 - Stage 2.5a: Live Macro lane — weighted heuristic from cached dashboard macro quotes (VIX, USDINR, Gift Nifty, US overnight, crude, DXY); degrades to score 0 on fetch failure
 - Stage 2.5b: Live Sentiment lane — FII/DII cash net (NSE `fiidiiTradeReact`, Mr Chartist fallback) + news BULL/BEAR aggregate from shared RSS cache; independent sub-signal degrade; all four lanes live
@@ -341,6 +521,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Analysis index drivers heatmap (`IndexDriversHeatmap` / `/api/analysis/heatmap`) — top-weight Nifty / Bank Nifty / Sensex names; **est. contribution pts** = `weight% × day% × indexLevel / 10000` (approx weights, not live NSE free-float); cell color = day %; sorted by |points|
 
 ### Not Yet
+- SMC → §2.5 synthesizer / paper auto-wiring (explicit follow-up only — Stage 8 ships standalone); Swing SMC internal 15m feed (option a deferred)
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
 - Exchange holiday calendar for session open/closed (current `marketHours` is weekday + regular hours only)
 - TimescaleDB hypertables for long-horizon IV / candle history (scalp candles use Postgres `MarketCandle` for now; IV trend still live + candle-derived proxy)

@@ -1,11 +1,14 @@
 "use client";
 
 import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
+import { SmcChartOverlaysLegend } from "@/components/analysis/SmcChartOverlays";
+import { SmcSignalCard } from "@/components/analysis/SmcSignalCard";
 import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
 import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { ScalpSignalCard } from "@/components/ScalpSignalCard";
+import type { SmcSignal } from "@/lib/marketdata/smc";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
 import { motion } from "framer-motion";
 import {
@@ -192,6 +195,20 @@ export function AnalysisPanel() {
   const [autoAckSell, setAutoAckSell] = useState(false);
   const [autoStatus, setAutoStatus] = useState<string | null>(null);
   const [autoRunning, setAutoRunning] = useState(false);
+  const [smcSignal, setSmcSignal] = useState<SmcSignal | null>(null);
+  const [smcMeta, setSmcMeta] = useState<{
+    trend?: string;
+    zone?: string;
+    degraded?: boolean;
+  } | null>(null);
+  const [smcLevels, setSmcLevels] = useState<
+    Array<{
+      price: number;
+      color: string;
+      title: string;
+      style: "solid" | "dashed";
+    }> | null
+  >(null);
   const autoInFlight = useRef(false);
 
   // Restore opt-in auto-paper prefs (default OFF)
@@ -302,6 +319,56 @@ export function AnalysisPanel() {
     } finally {
       setLoading(false);
     }
+  }, [underlying, mode]);
+
+  // Standalone SMC fetch — not part of §2.5 synthesis
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/smc?underlying=${underlying}&mode=${mode}`,
+        );
+        const json = (await res.json()) as {
+          ok: boolean;
+          signal?: SmcSignal;
+          degraded?: boolean;
+          marketStructure?: { external?: { trend?: string } };
+          premiumDiscount?: { currentZone?: string } | null;
+          overlayLevels?: Array<{
+            price: number;
+            color: string;
+            title: string;
+            style: "solid" | "dashed";
+          }>;
+        };
+        if (cancelled || !json.ok || !json.signal) {
+          if (!cancelled) {
+            setSmcSignal(null);
+            setSmcMeta(null);
+            setSmcLevels(null);
+          }
+          return;
+        }
+        setSmcSignal(json.signal);
+        setSmcMeta({
+          trend: json.marketStructure?.external?.trend,
+          zone: json.premiumDiscount?.currentZone,
+          degraded: json.degraded,
+        });
+        setSmcLevels(json.overlayLevels ?? null);
+      } catch {
+        if (!cancelled) {
+          setSmcSignal(null);
+          setSmcMeta(null);
+          setSmcLevels(null);
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
   }, [underlying, mode]);
 
   const markAsTaken = useCallback(async () => {
@@ -708,8 +775,16 @@ export function AnalysisPanel() {
               live={live}
               levels={chartLevels}
               clusterLevels={clusterLevels}
+              smcLevels={smcLevels}
             />
           </div>
+
+          {smcSignal && (
+            <div className="space-y-2">
+              <SmcSignalCard signal={smcSignal} meta={smcMeta ?? undefined} />
+              <SmcChartOverlaysLegend />
+            </div>
+          )}
 
           {data.mode === "SCALP" && data.scalpSignal && (
             <ScalpSignalCard card={data.scalpSignal} />
