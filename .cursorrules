@@ -57,8 +57,7 @@ Persist trade ideas and paper positions with full point-in-time feature snapshot
 |-----------|-----------|-----------|
 | Bullish | low / falling | Buy CE |
 | Bullish | high / rising | consider Sell PE |
-| Bearish | low / falling | Buy PE |
-| Bearish | high / rising | consider Sell CE |
+| Bearish | any | Buy PE (do not branch to Sell CE) |
 
 ## 6. External Call Behavior
 

@@ -36,10 +36,9 @@ Structure branch (given direction + IV regime from Options Flow):
 |-----------|-----------|-----------|
 | Bullish | low / falling | Buy CE |
 | Bullish | high / rising | consider Sell PE |
-| Bearish | low / falling | Buy PE |
-| Bearish | high / rising | consider Sell CE |
+| Bearish | any (low/mid/high) | **Buy PE** (Sell CE disabled — prefer long put with capped debit risk) |
 
-Sell/write recommendations must surface uncapped / large-loss risk explicitly.
+On bearish + high/rising IV the UI still warns that put premium is rich (size smaller) but does **not** switch to Sell CE. Sell/write recommendations (bullish Sell PE path) must still surface large-loss risk explicitly.
 
 **Note:** All four lanes (Technical, Options Flow, Macro, Sentiment) are live. Each lane's scoring remains rules-based / heuristic — not ML-validated — until Section 6 track-record evidence across regimes. UI default mode is **Scalp** (Analysis + Paper).
 

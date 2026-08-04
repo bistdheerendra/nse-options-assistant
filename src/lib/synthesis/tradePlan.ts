@@ -59,7 +59,7 @@ function pickAtm(
  *   SL = entry − k·ATR (capped by swingLow when available)
  *   risk = entry − SL
  *   TP1 = entry + 2·risk; TP2 = entry + 3·risk
- * Bearish (BUY_PE / SELL_CE): mirrored above spot.
+ * Bearish (BUY_PE): mirrored above spot.
  */
 export function buildTradePlan(params: {
   spot: number;

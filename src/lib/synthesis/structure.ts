@@ -25,7 +25,9 @@ function ivIsHighOrRising(extras: OptionsFlowExtras): boolean {
 }
 
 /**
- * IV-aware structure branching per docs/PROJECT.md §2.5
+ * Structure branching per docs/PROJECT.md §2.5
+ * Bullish: IV-aware Buy CE vs Sell PE.
+ * Bearish: always Buy PE (Sell CE path disabled by product preference).
  */
 export function synthesizeStructure(
   verdict: DirectionalVerdict,
@@ -65,26 +67,19 @@ export function synthesizeStructure(
     };
   }
 
-  if (verdict === "BEARISH" && ivIsLowOrFalling(extras)) {
+  // Bearish → always Buy PE (never Sell CE). High/rising IV still buys the put;
+  // premium is richer but max loss stays capped at debit paid.
+  if (verdict === "BEARISH") {
+    const ivNote = ivIsHighOrRising(extras)
+      ? `IV is ${extras.ivLevel}/${extras.ivTrend} — put premium is rich; size smaller.`
+      : `IV ${extras.ivLevel}/${extras.ivTrend} favours long premium.`;
     return {
       branch: "BUY_PE",
       action: "BUY",
       optionType: "PE",
       isSellWrite: false,
-      reasoning: `Bearish + low/falling IV → Buy PE. Long puts for downside with defined premium risk.`,
+      reasoning: `Bearish → Buy PE. ${ivNote}`,
       riskWarning: "Buy risk: max loss capped at premium paid × lotSize × lots.",
-    };
-  }
-
-  if (verdict === "BEARISH" && ivIsHighOrRising(extras)) {
-    return {
-      branch: "SELL_CE",
-      action: "SELL",
-      optionType: "CE",
-      isSellWrite: true,
-      reasoning: `Bearish + high/rising IV → consider Sell CE (credit). Elevated call premium; bearish view expects calls to decay.`,
-      riskWarning:
-        "SELL/WRITE RISK: Call writing has theoretically UNCAPPED loss if the underlying rallies. Do not treat this like a capped debit buy.",
     };
   }
 
