@@ -59,6 +59,39 @@ export async function POST(req: Request) {
         ? Number(body.takeProfit)
         : undefined;
 
+    const entrySpotAtSignal =
+      body.entrySpotAtSignal != null &&
+      Number.isFinite(Number(body.entrySpotAtSignal))
+        ? Number(body.entrySpotAtSignal)
+        : undefined;
+    const stopLossSpot =
+      body.stopLossSpot != null && Number.isFinite(Number(body.stopLossSpot))
+        ? Number(body.stopLossSpot)
+        : undefined;
+    const tp1Spot =
+      body.tp1Spot != null && Number.isFinite(Number(body.tp1Spot))
+        ? Number(body.tp1Spot)
+        : undefined;
+    const tp2Spot =
+      body.tp2Spot != null && Number.isFinite(Number(body.tp2Spot))
+        ? Number(body.tp2Spot)
+        : undefined;
+    const delta =
+      body.delta != null && Number.isFinite(Number(body.delta))
+        ? Number(body.delta)
+        : undefined;
+
+    const spotLevels =
+      entrySpotAtSignal != null && stopLossSpot != null && tp1Spot != null
+        ? {
+            entrySpotAtSignal,
+            stopLossSpot,
+            tp1Spot,
+            tp2Spot: tp2Spot ?? null,
+            delta: delta ?? null,
+          }
+        : null;
+
     const account = await openPaperTrade({
       underlying: String(body.underlying),
       strike: Number(body.strike),
@@ -71,9 +104,13 @@ export async function POST(req: Request) {
       mode: body.mode === "SCALP" ? "SCALP" : "SWING",
       symbolToken: body.symbolToken,
       tradingSymbol: body.tradingSymbol,
-      entrySnapshot: { risk },
+      entrySnapshot: {
+        risk,
+        ...(body.tradeIdeaId ? { tradeIdeaId: body.tradeIdeaId } : {}),
+      },
       stopLoss,
       takeProfit,
+      spotLevels,
     });
 
     return NextResponse.json({

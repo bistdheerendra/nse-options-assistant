@@ -35,6 +35,8 @@ type ChainContract = {
   volume?: number;
   oi?: number;
   iv?: number;
+  /** Angel Greeks delta when available. */
+  delta?: number | null;
   lotSize: number;
   expiry: string;
 };
@@ -59,7 +61,36 @@ type PositionRow = {
   tradingSymbol?: string | null;
   openedAt?: string;
   closedAt?: string | null;
+  entrySnapshot?: unknown;
 };
+
+function slTpLabel(snap: unknown): {
+  text: string | null;
+  title: string | null;
+} {
+  if (!snap || typeof snap !== "object") return { text: null, title: null };
+  const s = snap as Record<string, unknown>;
+  if (s.slTpSource === "delta") {
+    return {
+      text: "approx., delta-based",
+      title:
+        "Premium SL/TP projected from verdict-card spot levels via linear delta. Valid only for small spot moves — not a live reprice.",
+    };
+  }
+  if (s.slTpSource === "multiplier_fallback") {
+    // Spots persisted but no Greeks → static 0.6/1.8 (or manual) — not verdict-spot-derived
+    const hasSpots =
+      typeof s.entrySpotAtSignal === "number" &&
+      typeof s.stopLossSpot === "number";
+    return {
+      text: "est. — no delta",
+      title: hasSpots
+        ? "Premium SL/TP uses the static 0.6×/1.8× multiplier (Angel Greeks unavailable for this strike). Verdict-card spot levels are stored on entrySnapshot for audit only."
+        : "Premium SL/TP from static multiplier (or manual entry) — not derived from Analysis spot levels.",
+    };
+  }
+  return { text: null, title: null };
+}
 
 type Account = {
   cashBalance: number;
@@ -129,6 +160,10 @@ function PremiumCell({
   }
   const pct = contract.changePct;
   const up = (pct ?? 0) >= 0;
+  const delta =
+    contract.delta != null && Number.isFinite(contract.delta)
+      ? contract.delta
+      : null;
   return (
     <button
       type="button"
@@ -148,6 +183,14 @@ function PremiumCell({
         >
           {up ? "+" : ""}
           {pct.toFixed(2)}%
+        </span>
+      )}
+      {delta != null && (
+        <span
+          className="block text-[10px] tabular-nums text-binance-muted"
+          title="Angel Greeks (approx.) — live contracts, market hours only"
+        >
+          Δ {delta.toFixed(2)}
         </span>
       )}
     </button>
@@ -427,6 +470,7 @@ export function PaperTradingPanel() {
     spotChangePct,
     feed: chainFeed,
     subscribedTokens,
+    greeksStatus,
     live: chainLive,
     loading: chainLoading,
     error: chainError,
@@ -807,6 +851,15 @@ export function PaperTradingPanel() {
 
       {/* Chain left + Binance-style order ticket right */}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,400px)] lg:items-start">
+        <div className="min-w-0 space-y-1.5">
+          {greeksStatus === "unavailable" && (
+            <p
+              className="px-0.5 text-[11px] text-binance-muted"
+              title="Angel Greeks (approx.) — live contracts, market hours only"
+            >
+              Greeks unavailable outside market hours
+            </p>
+          )}
         <div
           ref={chainScrollRef}
           className="relative max-h-[min(560px,65vh)] min-h-80 overflow-auto rounded-lg border border-binance-border bg-binance-surface"
@@ -886,6 +939,7 @@ export function PaperTradingPanel() {
               {spotInsertIndex === strikes.length && spotRow}
             </tbody>
           </table>
+        </div>
         </div>
 
         <aside className="sticky top-4 rounded-lg border border-binance-border bg-binance-surface p-4">
@@ -976,6 +1030,7 @@ export function PaperTradingPanel() {
                 const liveMark = liveMarkForPosition(p);
                 const mark = liveMark ?? p.entryPremium;
                 const { stopLoss, takeProfit } = levelsFor(p);
+                const slTp = slTpLabel(p.entrySnapshot);
                 // Live P&L: BUY (mark - entry) * lot * lots; SELL (entry - mark) * lot * lots
                 const livePnl =
                   liveMark == null
@@ -1006,11 +1061,27 @@ export function PaperTradingPanel() {
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2 tabular-nums text-binance-bear">
+                    <td
+                      className="px-3 py-2 tabular-nums text-binance-bear"
+                      title={slTp.title ?? undefined}
+                    >
                       {stopLoss.toFixed(2)}
+                      {slTp.text && (
+                        <span className="mt-0.5 block text-[10px] font-normal text-binance-muted">
+                          {slTp.text}
+                        </span>
+                      )}
                     </td>
-                    <td className="px-3 py-2 tabular-nums text-binance-bull">
+                    <td
+                      className="px-3 py-2 tabular-nums text-binance-bull"
+                      title={slTp.title ?? undefined}
+                    >
                       {takeProfit.toFixed(2)}
+                      {slTp.text && (
+                        <span className="mt-0.5 block text-[10px] font-normal text-binance-muted">
+                          {slTp.text}
+                        </span>
+                      )}
                     </td>
                     <td
                       className={`px-3 py-2 font-medium tabular-nums ${
@@ -1092,6 +1163,7 @@ export function PaperTradingPanel() {
                 })
                 .map((p) => {
                   const { stopLoss, takeProfit } = levelsFor(p);
+                  const slTp = slTpLabel(p.entrySnapshot);
                   const endMs = p.closedAt
                     ? new Date(p.closedAt).getTime()
                     : now;
@@ -1106,11 +1178,27 @@ export function PaperTradingPanel() {
                       <td className="px-3 py-2 tabular-nums">
                         {p.exitPremium != null ? Number(p.exitPremium).toFixed(2) : "—"}
                       </td>
-                      <td className="px-3 py-2 tabular-nums text-binance-bear">
+                      <td
+                        className="px-3 py-2 tabular-nums text-binance-bear"
+                        title={slTp.title ?? undefined}
+                      >
                         {stopLoss.toFixed(2)}
+                        {slTp.text && (
+                          <span className="mt-0.5 block text-[10px] font-normal text-binance-muted">
+                            {slTp.text}
+                          </span>
+                        )}
                       </td>
-                      <td className="px-3 py-2 tabular-nums text-binance-bull">
+                      <td
+                        className="px-3 py-2 tabular-nums text-binance-bull"
+                        title={slTp.title ?? undefined}
+                      >
                         {takeProfit.toFixed(2)}
+                        {slTp.text && (
+                          <span className="mt-0.5 block text-[10px] font-normal text-binance-muted">
+                            {slTp.text}
+                          </span>
+                        )}
                       </td>
                       <td
                         className={`px-3 py-2 font-medium tabular-nums ${

@@ -16,6 +16,7 @@ export type OptionChainLiveContract = {
   volume?: number;
   oi?: number;
   iv?: number;
+  delta?: number | null;
   lotSize: number;
   expiry: string;
 };
@@ -32,6 +33,9 @@ export function useOptionChainLiveStream(underlying: string) {
   const [spotChangePct, setSpotChangePct] = useState(0);
   const [feed, setFeed] = useState<"angel-ws" | "rest" | "demo" | undefined>();
   const [subscribedTokens, setSubscribedTokens] = useState(0);
+  const [greeksStatus, setGreeksStatus] = useState<
+    "ok" | "unavailable" | "skipped" | undefined
+  >();
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
@@ -57,6 +61,7 @@ export function useOptionChainLiveStream(underlying: string) {
     setSpot(null);
     setFeed(undefined);
     setSubscribedTokens(0);
+    setGreeksStatus(undefined);
     hasDataRef.current = false;
 
     const es = new EventSource(
@@ -76,6 +81,7 @@ export function useOptionChainLiveStream(underlying: string) {
           setSpotChangePct(Number(payload.spotChangePct ?? 0));
           setFeed(payload.feed);
           setSubscribedTokens(payload.subscribedTokens);
+          setGreeksStatus(payload.greeksStatus);
           setLive(true);
           setError(null);
           setLoading(false);
@@ -130,6 +136,7 @@ export function useOptionChainLiveStream(underlying: string) {
     spotChangePct,
     feed,
     subscribedTokens,
+    greeksStatus,
     live,
     loading,
     error,

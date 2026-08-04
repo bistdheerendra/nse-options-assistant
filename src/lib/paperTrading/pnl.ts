@@ -126,7 +126,8 @@ export function unrealizedPnl(params: {
 export type CloseReason = "MANUAL" | "TP" | "SL" | "EXPIRED";
 
 /**
- * Default premium TP/SL for paper options (not spot levels).
+ * Fallback premium TP/SL when option delta is unavailable (not derived from
+ * Analysis verdict-card spot levels).
  * BUY: SL = 0.6·entry (≈40% premium loss); risk = 0.4·entry; TP = entry + 2·risk = 1.8·entry
  * SELL: SL = 1.4·entry (≈40% adverse); risk = 0.4·entry; TP = entry − 2·risk = 0.2·entry
  */
@@ -145,6 +146,125 @@ export function defaultPremiumTpSl(
   const risk = stopLoss - entry; // 0.4·entry
   const takeProfit = Number(Math.max(0, entry - 2 * risk).toFixed(2)); // 0.2·entry
   return { stopLoss, takeProfit };
+}
+
+/** How premium SL/TP were derived — persisted on entrySnapshot for audit/UI. */
+export type PremiumSlTpSource = "delta" | "multiplier_fallback";
+
+export type SpotLevelsForPremiumSlTp = {
+  entrySpotAtSignal: number;
+  stopLossSpot: number;
+  tp1Spot: number;
+  tp2Spot?: number | null;
+  /** Option delta from Angel /optionGreek if available; omit when unknown. */
+  delta?: number | null;
+};
+
+export type PremiumSlTpResult = {
+  stopLoss: number;
+  takeProfit: number;
+  /** Secondary TP from tp2Spot when delta-derived; else null. */
+  takeProfit2: number | null;
+  source: PremiumSlTpSource;
+  entrySpotAtSignal: number | null;
+  stopLossSpot: number | null;
+  tp1Spot: number | null;
+  tp2Spot: number | null;
+  delta: number | null;
+};
+
+/**
+ * Project option premium at a spot level via linear delta approximation.
+ * projectedPremium(spotLevel) = entryPremium + delta * (spotLevel − entrySpotAtSignal)
+ * Clamp to ≥ 0 (premium can't go negative). Valid only for small spot moves.
+ */
+export function projectedPremiumAtSpot(params: {
+  entryPremium: number;
+  entrySpotAtSignal: number;
+  spotLevel: number;
+  delta: number;
+}): number {
+  // projectedPremium = entryPremium + delta * (spotLevel − entrySpotAtSignal); clamp ≥ 0
+  const raw =
+    params.entryPremium +
+    params.delta * (params.spotLevel - params.entrySpotAtSignal);
+  return Number(Math.max(0, raw).toFixed(2));
+}
+
+/**
+ * Premium SL/TP from the SAME spot Entry/SL/TP1 the user saw on the Analysis
+ * verdict card. Prefer delta-linear projection; else 0.6/1.8 multiplier fallback.
+ */
+export function resolvePremiumTpSl(params: {
+  action: TradeAction;
+  entryPremium: number;
+  spots?: SpotLevelsForPremiumSlTp | null;
+}): PremiumSlTpResult {
+  const spots = params.spots;
+  const hasSpots =
+    spots != null &&
+    Number.isFinite(spots.entrySpotAtSignal) &&
+    Number.isFinite(spots.stopLossSpot) &&
+    Number.isFinite(spots.tp1Spot);
+
+  const delta =
+    spots?.delta != null && Number.isFinite(spots.delta) ? spots.delta : null;
+
+  if (hasSpots && delta != null) {
+    // stopLoss  = entryPremium + delta * (stopLossSpot − entrySpotAtSignal)
+    // takeProfit = entryPremium + delta * (tp1Spot − entrySpotAtSignal)   // TP1 primary
+    // takeProfit2 = entryPremium + delta * (tp2Spot − entrySpotAtSignal)  // optional
+    const stopLoss = projectedPremiumAtSpot({
+      entryPremium: params.entryPremium,
+      entrySpotAtSignal: spots!.entrySpotAtSignal,
+      spotLevel: spots!.stopLossSpot,
+      delta,
+    });
+    const takeProfit = projectedPremiumAtSpot({
+      entryPremium: params.entryPremium,
+      entrySpotAtSignal: spots!.entrySpotAtSignal,
+      spotLevel: spots!.tp1Spot,
+      delta,
+    });
+    const takeProfit2 =
+      spots!.tp2Spot != null && Number.isFinite(spots!.tp2Spot)
+        ? projectedPremiumAtSpot({
+            entryPremium: params.entryPremium,
+            entrySpotAtSignal: spots!.entrySpotAtSignal,
+            spotLevel: spots!.tp2Spot,
+            delta,
+          })
+        : null;
+    return {
+      stopLoss,
+      takeProfit,
+      takeProfit2,
+      source: "delta",
+      entrySpotAtSignal: spots!.entrySpotAtSignal,
+      stopLossSpot: spots!.stopLossSpot,
+      tp1Spot: spots!.tp1Spot,
+      tp2Spot: spots!.tp2Spot ?? null,
+      delta,
+    };
+  }
+
+  if (hasSpots && delta == null) {
+    console.warn(
+      "[paper] premium SL/TP using multiplier fallback — no option delta available",
+    );
+  }
+
+  const fallback = defaultPremiumTpSl(params.action, params.entryPremium);
+  return {
+    ...fallback,
+    takeProfit2: null,
+    source: "multiplier_fallback",
+    entrySpotAtSignal: hasSpots ? spots!.entrySpotAtSignal : null,
+    stopLossSpot: hasSpots ? spots!.stopLossSpot : null,
+    tp1Spot: hasSpots ? spots!.tp1Spot : null,
+    tp2Spot: hasSpots ? (spots!.tp2Spot ?? null) : null,
+    delta: null,
+  };
 }
 
 /** Which exit level (if any) the live mark has hit. */

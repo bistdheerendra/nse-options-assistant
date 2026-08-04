@@ -4,10 +4,12 @@ import { hasDatabase, prisma } from "@/lib/prisma";
 import {
   defaultPremiumTpSl,
   premiumExitHit,
+  resolvePremiumTpSl,
   settlePnl,
   unrealizedPnl,
   type CloseReason,
   type OptionSide,
+  type SpotLevelsForPremiumSlTp,
   type TradeAction,
 } from "./pnl";
 import type { Prisma } from "@prisma/client";
@@ -275,32 +277,70 @@ export async function openPaperTrade(input: {
   entrySnapshot?: unknown;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  /** Verdict-card spot levels — preferred source for premium SL/TP when present. */
+  spotLevels?: SpotLevelsForPremiumSlTp | null;
 }): Promise<PaperAccount> {
   // Premium cash impact: BUY debits premium*mult; SELL credits it
   const notional = input.entryPremium * input.lotSize * input.lots;
   const cashDelta = input.action === "BUY" ? -notional : notional;
-  const defaults = defaultPremiumTpSl(input.action, input.entryPremium);
-  const stopLoss =
-    input.stopLoss != null && Number.isFinite(input.stopLoss)
-      ? Number(input.stopLoss)
-      : defaults.stopLoss;
-  const takeProfit =
-    input.takeProfit != null && Number.isFinite(input.takeProfit)
-      ? Number(input.takeProfit)
-      : defaults.takeProfit;
+
+  const hasSpotLevels =
+    input.spotLevels != null &&
+    Number.isFinite(input.spotLevels.entrySpotAtSignal) &&
+    Number.isFinite(input.spotLevels.stopLossSpot) &&
+    Number.isFinite(input.spotLevels.tp1Spot);
+
+  let stopLoss: number;
+  let takeProfit: number;
+  let takeProfit2: number | null = null;
+  let slTpMeta: Record<string, unknown> = {};
+
+  if (hasSpotLevels) {
+    // Prefer delta projection from Analysis Entry/SL/TP1; else 0.6/1.8 fallback
+    const resolved = resolvePremiumTpSl({
+      action: input.action,
+      entryPremium: input.entryPremium,
+      spots: input.spotLevels,
+    });
+    stopLoss = resolved.stopLoss;
+    takeProfit = resolved.takeProfit;
+    takeProfit2 = resolved.takeProfit2;
+    slTpMeta = {
+      stopLoss,
+      takeProfit,
+      takeProfit2,
+      slTpSource: resolved.source,
+      entrySpotAtSignal: resolved.entrySpotAtSignal,
+      stopLossSpot: resolved.stopLossSpot,
+      tp1Spot: resolved.tp1Spot,
+      tp2Spot: resolved.tp2Spot,
+      delta: resolved.delta,
+    };
+  } else {
+    const defaults = defaultPremiumTpSl(input.action, input.entryPremium);
+    stopLoss =
+      input.stopLoss != null && Number.isFinite(input.stopLoss)
+        ? Number(input.stopLoss)
+        : defaults.stopLoss;
+    takeProfit =
+      input.takeProfit != null && Number.isFinite(input.takeProfit)
+        ? Number(input.takeProfit)
+        : defaults.takeProfit;
+    slTpMeta = {
+      stopLoss,
+      takeProfit,
+      slTpSource: "multiplier_fallback" as const,
+    };
+  }
 
   if (hasDatabase() && prisma) {
     const acc = await getOrCreateAccount();
-    const entrySnapshot = mergeSnapshot(input.entrySnapshot, {
-      stopLoss,
-      takeProfit,
-    });
+    const entrySnapshot = mergeSnapshot(input.entrySnapshot, slTpMeta);
     await prisma.$transaction(async (tx) => {
       await tx.paperOptionsAccount.update({
         where: { id: acc.id },
         data: { cashBalance: acc.cashBalance + cashDelta },
       });
-      // TP/SL live in entrySnapshot until prisma generate + db push land dedicated columns
       await tx.optionsPosition.create({
         data: {
           accountId: acc.id,
@@ -312,6 +352,8 @@ export async function openPaperTrade(input: {
           lotSize: input.lotSize,
           lots: input.lots,
           entryPremium: input.entryPremium,
+          stopLoss,
+          takeProfit,
           mode: input.mode,
           symbolToken: input.symbolToken,
           tradingSymbol: input.tradingSymbol,
@@ -344,7 +386,7 @@ export async function openPaperTrade(input: {
     symbolToken: input.symbolToken,
     tradingSymbol: input.tradingSymbol,
     openedAt: new Date().toISOString(),
-    entrySnapshot: mergeSnapshot(input.entrySnapshot, { stopLoss, takeProfit }),
+    entrySnapshot: mergeSnapshot(input.entrySnapshot, slTpMeta),
   };
   store.account.cashBalance += cashDelta;
   store.account.positions.push(pos);

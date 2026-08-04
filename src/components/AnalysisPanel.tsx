@@ -152,6 +152,7 @@ type SynthesisPayload = {
       tradingsymbol: string;
       symboltoken: string;
       premiumStopHint: number | null;
+      delta: number | null;
     } | null;
   };
   experimentalEdge: {
@@ -329,8 +330,13 @@ export function AnalysisPanel() {
           tradingSymbol: c.tradingsymbol,
           acknowledgeSellRisk: ackSell,
           tradeIdeaId: data.tradeIdeaId,
-          // Premium SL hint from plan when buy; else server defaults (1:2 R on premium)
-          stopLoss: c.premiumStopHint ?? undefined,
+          // Same spot levels as the verdict card (Entry / SL / TP1 / TP2)
+          entrySpotAtSignal: data.tradePlan.entry,
+          stopLossSpot: data.tradePlan.stopLoss ?? undefined,
+          tp1Spot: data.tradePlan.takeProfit1 ?? undefined,
+          tp2Spot: data.tradePlan.takeProfit2 ?? undefined,
+          // Angel Greeks delta when chain merge succeeded; else multiplier fallback
+          delta: c.delta ?? undefined,
         }),
       });
       const json = await res.json();
@@ -601,11 +607,23 @@ export function AnalysisPanel() {
                     {data.structure.riskWarning}
                   </p>
                 )}
-                {data.tradePlan.suggestedContract?.premiumStopHint != null && (
+                {data.tradePlan.suggestedContract &&
+                  data.tradePlan.stopLoss != null &&
+                  data.tradePlan.takeProfit1 != null && (
+                  <p className="text-xs text-binance-muted">
+                    Paper SL/TP use these spot levels (Entry / SL / TP1). Premium
+                    targets are delta-projected when Greeks are available;
+                    otherwise a static multiplier labeled{" "}
+                    <span className="text-binance-text">est. — no delta</span>.
+                  </p>
+                )}
+                {data.tradePlan.suggestedContract?.premiumStopHint != null &&
+                  (data.tradePlan.stopLoss == null ||
+                    data.tradePlan.takeProfit1 == null) && (
                   <p className="text-xs text-binance-muted">
                     Premium soft-stop hint ≈ ₹
                     {fmt(data.tradePlan.suggestedContract.premiumStopHint)}{" "}
-                    (−40% of entry premium on buys).
+                    (−40% of entry premium on buys; spot ATR levels unavailable).
                   </p>
                 )}
 

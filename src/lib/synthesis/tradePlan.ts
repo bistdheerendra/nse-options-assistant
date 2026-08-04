@@ -27,6 +27,11 @@ export type TradePlan = {
     symboltoken: string;
     /** Buy: premium stop ≈ 40% loss. Sell: soft alert only. */
     premiumStopHint: number | null;
+    /**
+     * Angel Greeks delta for this strike/type when available.
+     * Used for premium SL/TP projection; null → multiplier fallback.
+     */
+    delta: number | null;
   } | null;
 };
 
@@ -128,6 +133,9 @@ export function buildTradePlan(params: {
         tradingsymbol: c.tradingsymbol,
         symboltoken: c.symboltoken,
         premiumStopHint,
+        // Angel /optionGreek merge on chain; null → SL/TP multiplier fallback
+        delta:
+          c.delta != null && Number.isFinite(c.delta) ? c.delta : null,
       };
     }
   }

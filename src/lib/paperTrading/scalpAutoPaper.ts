@@ -202,7 +202,17 @@ export async function runScalpAutoPaper(opts?: {
         mode: "SCALP",
         symbolToken: c.symboltoken,
         tradingSymbol: c.tradingsymbol,
-        stopLoss: c.premiumStopHint ?? undefined,
+        spotLevels:
+          syn.tradePlan.stopLoss != null && syn.tradePlan.takeProfit1 != null
+            ? {
+                entrySpotAtSignal: syn.tradePlan.entry,
+                stopLossSpot: syn.tradePlan.stopLoss,
+                tp1Spot: syn.tradePlan.takeProfit1,
+                tp2Spot: syn.tradePlan.takeProfit2,
+                // Angel Greeks when available; null → 0.6/1.8 multiplier fallback
+                delta: c.delta ?? null,
+              }
+            : null,
         entrySnapshot: {
           risk,
           autoPaper: true,

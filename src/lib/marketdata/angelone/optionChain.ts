@@ -10,6 +10,7 @@ import {
   getNseOptionChain,
   isNseOptionChainUnderlying,
 } from "@/lib/marketdata/nseOptionChain";
+import { attachOptionGreeks } from "@/lib/marketdata/optionGreeks";
 
 type ScripRow = {
   token: string;
@@ -148,8 +149,19 @@ async function quoteFull(
  * Full option chain for an underlying + expiry.
  * Prefers NSE India live OC for NIFTY/BANKNIFTY (LTP + OI + % change).
  * Falls back to Angel One SmartAPI quote FULL, then labeled demo mocks.
+ * Angel Option Greeks (delta) are merged by strike+optionType afterward —
+ * NSE OC has no Greeks; LTP/OI source is never replaced.
  */
 export async function getOptionChain(
+  underlying: Underlying,
+  expiry?: string,
+): Promise<OptionChainResult> {
+  const chain = await getOptionChainQuotes(underlying, expiry);
+  return attachOptionGreeks(chain);
+}
+
+/** LTP/OI/IV assembly only (NSE → Angel → demo). Greeks attached by getOptionChain. */
+async function getOptionChainQuotes(
   underlying: Underlying,
   expiry?: string,
 ): Promise<OptionChainResult> {

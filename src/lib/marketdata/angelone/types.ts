@@ -43,6 +43,11 @@ export type OptionContractQuote = {
   volume?: number;
   oi?: number;
   iv?: number;
+  /**
+   * Angel Option Greeks delta (signed; PE typically negative).
+   * Sourced from /optionGreek — not NSE OC. Omit when unavailable.
+   */
+  delta?: number | null;
   lotSize: number;
   expiry: string;
 };
@@ -57,6 +62,12 @@ export type OptionChainResult = {
   expiry: string;
   contracts: OptionContractQuote[];
   demo?: boolean;
+  /**
+   * Angel Greeks merge status for paper-chain UI.
+   * ok = at least some deltas attached; unavailable = off-hours/AB9019/fail;
+   * skipped = demo / no Angel credentials.
+   */
+  greeksStatus?: "ok" | "unavailable" | "skipped";
 };
 
 /** Well-known index tokens on Angel One (NSE/BSE indices) */
