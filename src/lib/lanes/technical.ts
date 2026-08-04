@@ -107,6 +107,109 @@ function intervalForMode(mode: TradingMode): CandleInterval {
   return mode === "SCALP" ? "FIVE_MINUTE" : "ONE_HOUR";
 }
 
+/**
+ * Classic Technical EMA50 vs EMA200 stack contribution (±this weight).
+ * Used for SWING (1h). On SCALP 5m bars this is still multi-session lag
+ * (≈4h / ≈2 sessions) — SCALP uses EMA_STACK_SCALP_WEIGHT instead.
+ */
+export const EMA_STACK_BASE_WEIGHT = 0.35;
+
+/**
+ * SCALP EMA50/200 regime term (±this weight). Reduced from 0.35 → 0.25 to
+ * make room for FAST_EMA_TERM_WEIGHT without stacking uncapped weight.
+ */
+export const EMA_STACK_SCALP_WEIGHT = 0.25;
+
+/**
+ * SCALP-only fast EMA10/20 cross — same-session momentum confirmation.
+ * Weighted lighter than the primary regime stack; flat ± for v1 (ATR-scaled
+ * magnitude is a possible later refinement).
+ */
+export const FAST_EMA_TERM_WEIGHT = 0.2;
+
+/**
+ * SCALP-only: when Stage-8 MTF confluence strongly disagrees with the EMA
+ * regime direction, multiply the EMA term by this factor (dampen, don't zero)
+ * so lagging regime can inform but not single-handedly cancel near-term PA.
+ */
+export const EMA_DAMPEN_FACTOR = 0.5;
+
+/** Structure TFs used for EMA dampen strength (1m excluded — too noisy). */
+const SCALP_EMA_CONFLUENCE_TFS = [
+  "THREE_MINUTE",
+  "FIVE_MINUTE",
+  "FIFTEEN_MINUTE",
+] as const;
+
+export type ScalpConfluenceForEmaDampen = {
+  bullish: string[];
+  bearish: string[];
+  dominant: "bullish" | "bearish" | null;
+};
+
+/**
+ * Dampen classic EMA stack term when SCALP multi-TF confluence (3m/5m/15m)
+ * is unanimous opposite to EMA50/200. Does not change Stage-8 technicalBiasAdj.
+ *
+ * emaTermWeight = |emaStackTerm| (= EMA_STACK_SCALP_WEIGHT normally on SCALP)
+ *   if dominant opposite to EMA and ≥3 of {3m,5m,15m} agree → × EMA_DAMPEN_FACTOR
+ * score' = score − emaStackTerm + sign(emaStackTerm) × emaTermWeight
+ * Does not touch fastEmaTerm (10/20) — only the lagging 50/200 regime term.
+ */
+export function applyScalpEmaStackDampen(params: {
+  score: number;
+  /** Signed EMA stack contribution already in `score` (±EMA_STACK_SCALP_WEIGHT on SCALP). */
+  emaStackTerm: number;
+  timeframeConfluence: ScalpConfluenceForEmaDampen;
+}): {
+  score: number;
+  dampened: boolean;
+  emaTermWeight: number;
+  signal: string | null;
+} {
+  const { emaStackTerm, timeframeConfluence } = params;
+  let emaTermWeight = Math.abs(emaStackTerm);
+  if (emaTermWeight === 0 || timeframeConfluence.dominant == null) {
+    return {
+      score: params.score,
+      dampened: false,
+      emaTermWeight,
+      signal: null,
+    };
+  }
+
+  const emaDir: "bullish" | "bearish" =
+    emaStackTerm > 0 ? "bullish" : "bearish";
+  const dominant = timeframeConfluence.dominant;
+  const opposite = dominant !== emaDir;
+  const agreeing = SCALP_EMA_CONFLUENCE_TFS.filter((tf) =>
+    timeframeConfluence[dominant].includes(tf),
+  ).length;
+
+  // Require full 3m+5m+15m agreement on the opposite dominant (strength ≥ 3).
+  if (opposite && agreeing >= 3) {
+    // Dampen: replace full ±w with ±(w × EMA_DAMPEN_FACTOR)
+    // Δscore = emaStackTerm × (EMA_DAMPEN_FACTOR − 1)
+    emaTermWeight = emaTermWeight * EMA_DAMPEN_FACTOR;
+    const dampenedScore = clampScore(
+      params.score + emaStackTerm * (EMA_DAMPEN_FACTOR - 1),
+    );
+    return {
+      score: dampenedScore,
+      dampened: true,
+      emaTermWeight,
+      signal: `EMA stack dampened ×${EMA_DAMPEN_FACTOR} — ${agreeing}/3 of {3m,5m,15m} ${dominant} vs EMA ${emaDir} regime`,
+    };
+  }
+
+  return {
+    score: params.score,
+    dampened: false,
+    emaTermWeight,
+    signal: null,
+  };
+}
+
 export async function runTechnicalLane(params: {
   underlying: Underlying;
   mode?: TradingMode;
@@ -133,17 +236,52 @@ export async function runTechnicalLane(params: {
   const patterns = candlePatterns(candles[last]!, candles[last - 1]);
   const atr14 = calcAtr(candles, 14);
 
+  // SCALP only: fast 10/20 on the same 5m series (no second candle fetch).
+  // Flat ±FAST_EMA_TERM_WEIGHT for v1 — ATR-scaled |ema10−ema20| is a possible refinement.
+  let e10: number | undefined;
+  let e20: number | undefined;
+  let fastEmaTerm = 0;
+  if (mode === "SCALP") {
+    const ema10 = ema(closes, 10);
+    const ema20 = ema(closes, 20);
+    e10 = ema10[last]!;
+    e20 = ema20[last]!;
+  }
+
   const signals: string[] = [];
   let score = 0;
 
   // Trend: price vs EMA50/EMA200 + EMA stack
+  // SCALP uses EMA_STACK_SCALP_WEIGHT (0.25); SWING keeps EMA_STACK_BASE_WEIGHT (0.35)
+  const emaStackWeight =
+    mode === "SCALP" ? EMA_STACK_SCALP_WEIGHT : EMA_STACK_BASE_WEIGHT;
+  // EMA_t stack: e50 > e200 → +w; else −w
+  let emaStackTerm = 0;
   if (e50 > e200) {
-    score += 0.35;
+    emaStackTerm = emaStackWeight;
+    score += emaStackTerm;
     signals.push("EMA50 above EMA200 (bullish stack)");
   } else {
-    score -= 0.35;
+    emaStackTerm = -emaStackWeight;
+    score += emaStackTerm;
     signals.push("EMA50 below EMA200 (bearish stack)");
   }
+
+  // Fast EMA cross (10/20) — captures same-session scalp momentum, unlike
+  // the 50/200 regime term (~4h+ lookback even on 5m candles). Weighted
+  // lighter than the primary EMA stack since this is a supplementary
+  // confirmation signal, not the dominant regime read.
+  // ema10 > ema20 → bullish momentum; ema10 < ema20 → bearish momentum
+  if (mode === "SCALP" && e10 != null && e20 != null) {
+    fastEmaTerm = e10 > e20 ? +FAST_EMA_TERM_WEIGHT : -FAST_EMA_TERM_WEIGHT;
+    score += fastEmaTerm;
+    signals.push(
+      e10 > e20
+        ? `EMA10 above EMA20 (fast bullish cross, term=${fastEmaTerm})`
+        : `EMA10 below EMA20 (fast bearish cross, term=${fastEmaTerm})`,
+    );
+  }
+
   if (lastClose > e50) {
     score += 0.2;
     signals.push("Price above EMA50");
@@ -189,6 +327,10 @@ export async function runTechnicalLane(params: {
       interval: intervalForMode(mode),
       ema50: e50,
       ema200: e200,
+      ...(mode === "SCALP" && e10 != null && e20 != null
+        ? { ema10: e10, ema20: e20, fastEmaTerm }
+        : {}),
+      emaStackTerm,
       rsi14,
       lastClose,
       atr14,

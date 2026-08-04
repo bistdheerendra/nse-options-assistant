@@ -42,6 +42,27 @@ On bearish + high/rising IV the UI still warns that put premium is rich (size sm
 
 **Note:** All four lanes (Technical, Options Flow, Macro, Sentiment) are live. Each lane's scoring remains rules-based / heuristic — not ML-validated — until Section 6 track-record evidence across regimes. UI default mode is **Scalp** (Analysis + Paper).
 
+### SCALP Technical raw-term weights (5m)
+
+| Term | Weight | Notes |
+|------|-------:|-------|
+| EMA50/200 stack (regime) | ±0.25 | Was ±0.35; reduced to make room for fast cross. Still multi-session lag on 5m. |
+| Fast EMA10/20 cross | ±0.20 | SCALP only — same-session momentum. Flat ± v1; ATR-scaled magnitude is a possible refinement. |
+| Price vs EMA50 | ±0.20 | Unchanged |
+| RSI(14) | ±0.25 or mild | Unchanged |
+| Candle patterns | ±0.15 | Unchanged |
+| Scalp momentum (5 bars) | up to ±0.30 | Unchanged |
+
+SWING keeps EMA50/200 at `EMA_STACK_BASE_WEIGHT = 0.35` and has **no** fast 10/20 term.
+
+### SCALP EMA regime dampen (`EMA_DAMPEN_FACTOR`)
+
+On SCALP only, classic Technical still scores EMA50/200 on **5m** bars (`EMA_STACK_SCALP_WEIGHT = 0.25`). That stack is multi-session lag even on 5m. After Stage-8 `scalpSignal` is built — and **before** `technicalBiasAdj` — if `timeframeConfluence.dominant` is **opposite** to the EMA stack direction **and** all three of `{3m, 5m, 15m}` agree on that dominant (1m excluded), the EMA term is multiplied by `EMA_DAMPEN_FACTOR = 0.5` (e.g. +0.25 → +0.125). Fast EMA10/20 is **not** dampened. SWING is unchanged. Stage-8 `technicalBiasAdj` formula and the ±0.15 neutral threshold are unchanged.
+
+### SCALP “lanes disagree” badge (UI only)
+
+When SCALP verdict is NEUTRAL / structure `NO_TRADE` and Technical vs Options Flow have **opposite signs** with `|tech − flow| > 0.4`, the Analysis verdict card shows **“Lanes disagree — Technical vs Options Flow”**. Does not change the trade decision.
+
 ## 3. Scalp / Swing mode
 
 | Mode | Timeframes | Weight emphasis |
@@ -188,6 +209,8 @@ In-process prior snapshot map (single-instance). Synthesis attaches `oiVelocity`
 Combines Stages 2–7 into one card (TF confluence, pattern, volume role, liquidity badge, nearest SL clusters, OI velocity, confirmation status).  
 `technicalBiasAdj` is added into the **existing** technical lane score before §2.5 weighted synthesis (SCALP weights unchanged: Flow 0.45 / Tech 0.35 / Sent 0.10 / Macro 0.10) — no second scorer.
 
+**EMA dampen (SCALP):** If confluence `dominant` opposes the classic EMA50/200 stack and 3m+5m+15m all agree, apply `EMA_DAMPEN_FACTOR` (0.5) to that EMA term **before** adding `technicalBiasAdj` (see §2.5). Helpers: `applyScalpEmaStackDampen` in `src/lib/lanes/technical.ts`. Fast EMA10/20 (`FAST_EMA_TERM_WEIGHT`) is separate and not dampened.
+
 Actionable only when confirm=`confirmed` AND liquidity≠`fail` AND volume≠`disqualify` — still labeled heuristic.
 
 ### 3.1i Auto paper on actionable scalp
@@ -234,7 +257,7 @@ Expiry settlement (idempotent): intrinsic `max(0, spot-strike)` CE / `max(0, str
 
 Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshots persist with every trade idea (additive schema).
 
-- **Technical:** EMA50/200, RSI(14), patterns, ATR; Scalp adds short momentum on 5m.
+- **Technical:** EMA50/200, RSI(14), patterns, ATR; Scalp adds fast EMA10/20 cross (±0.20), short momentum on 5m, and EMA50/200 at ±0.25 (vs Swing ±0.35).
 - **Options Flow:** PCR, Max Pain, IV level/trend, OI notes; Scalp adds ATM call/put volume skew + liquidity flags.
 - **Sentiment:** FII/DII cash net (65%) + news bias (35%); Scalp dampens FII lag vs fresher news.
 - **Macro:** Gift Nifty, India VIX, USDINR, US overnight, crude, DXY; Scalp leans Gift/VIX slightly harder.
@@ -293,6 +316,9 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Scalp Stage 6: OI velocity (`oiVelocity.ts`) — ΔOI/minutes near ATM; warming_up until prior snapshot; synthesis `oiVelocity`; `npm run test:scalp-oi`
 - Scalp Stage 7: Confirmation candle (`confirmationCandle.ts`) — next closed 5m bar beyond trigger + rising volume; env-configurable; `npm run test:scalp-confirm`
 - Scalp Stage 8: Scalp signal card (`scalpSignal.ts` + `ScalpSignalCard`) — confluence/pattern/volume/liquidity/clusters/OI/confirm in one place; bias feeds existing §2.5 synthesizer
+- SCALP EMA dampen: when Stage-8 MTF confluence (3m+5m+15m) strongly opposes classic EMA50/200 stack, multiply EMA term by `EMA_DAMPEN_FACTOR` (0.5) before `technicalBiasAdj`; SWING untouched
+- SCALP fast EMA10/20 momentum term (`FAST_EMA_TERM_WEIGHT = 0.20`) on same 5m series; EMA50/200 SCALP base weight 0.35 → 0.25 (`EMA_STACK_SCALP_WEIGHT`); SWING stays 50/200 only at 0.35
+- SCALP Analysis UI: “Lanes disagree — Technical vs Options Flow” badge on NEUTRAL/NO_TRADE when Tech vs OF opposite signs and |Δ| > 0.4 (context only — still NO_TRADE)
 - Scalp auto-paper (opt-in): UI toggle + `/api/cron/scalp-auto-paper` opens paper when rule stack cleared; dedupe OPEN; sell ack required; paper only
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
 - Stage 2.5a: Live Macro lane — weighted heuristic from cached dashboard macro quotes (VIX, USDINR, Gift Nifty, US overnight, crude, DXY); degrades to score 0 on fetch failure

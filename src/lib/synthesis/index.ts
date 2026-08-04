@@ -19,7 +19,11 @@ import {
 import { runMacroLane } from "@/lib/lanes/macro";
 import { runOptionsFlowLane } from "@/lib/lanes/optionsFlow";
 import { runSentimentLane } from "@/lib/lanes/sentiment";
-import { runTechnicalLane } from "@/lib/lanes/technical";
+import {
+  applyScalpEmaStackDampen,
+  EMA_STACK_SCALP_WEIGHT,
+  runTechnicalLane,
+} from "@/lib/lanes/technical";
 import type { TradingMode } from "@/lib/lanes/types";
 import { clampScore } from "@/lib/lanes/types";
 import { hasDatabase, prisma } from "@/lib/prisma";
@@ -172,18 +176,42 @@ export async function runSynthesis(params: {
         clusters: stopLossClusters,
         oiVelocity,
       });
+
+      // EMA regime term is a lagging multi-session signal even on 5m candles.
+      // When scalpSignal's multi-timeframe confluence strongly disagrees with
+      // it, dampen (don't zero) the EMA term so it can inform but not single-
+      // handedly cancel a clear near-term confluence read.
+      const emaStackTerm =
+        typeof technicalRaw.rawIndicators.emaStackTerm === "number"
+          ? technicalRaw.rawIndicators.emaStackTerm
+          : technicalRaw.signals.some((s) => s.includes("bullish stack"))
+            ? EMA_STACK_SCALP_WEIGHT
+            : technicalRaw.signals.some((s) => s.includes("bearish stack"))
+              ? -EMA_STACK_SCALP_WEIGHT
+              : 0;
+      const emaDampen = applyScalpEmaStackDampen({
+        score: technicalRaw.score,
+        emaStackTerm,
+        timeframeConfluence: scalpSignal.timeframeConfluence,
+      });
+
       // Feed Stage 2–7 lean into existing §2.5 SCALP technical weight (0.35) — not a second scorer.
+      // Order: classic technical → optional EMA dampen → Stage-8 technicalBiasAdj (unchanged formula).
       technical = {
         ...technicalRaw,
         score: clampScore(
-          technicalRaw.score + scalpSignal.technicalBiasAdj * 0.5,
+          emaDampen.score + scalpSignal.technicalBiasAdj * 0.5,
         ),
         signals: [
           ...technicalRaw.signals,
+          ...(emaDampen.signal ? [emaDampen.signal] : []),
           `Scalp PA/volume/OI adj=${scalpSignal.technicalBiasAdj.toFixed(2)} (heuristic)`,
         ],
         rawIndicators: {
           ...technicalRaw.rawIndicators,
+          emaStackTerm,
+          emaTermWeight: emaDampen.emaTermWeight,
+          emaStackDampened: emaDampen.dampened,
           scalpTechnicalBiasAdj: scalpSignal.technicalBiasAdj,
           scalpConfirmation: scalpSignal.confirmation.status,
         },

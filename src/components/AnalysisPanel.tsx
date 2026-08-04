@@ -23,6 +23,8 @@ const AUTO_PAPER_LS_KEY = "nse:scalpAutoPaper";
 const AUTO_PAPER_ACK_LS_KEY = "nse:scalpAutoPaperAckSell";
 /** Poll interval when auto-paper toggle is ON (Scalp mode only). */
 const AUTO_PAPER_POLL_MS = 60_000;
+/** SCALP NEUTRAL badge: Technical vs OF opposite signs and |Δ| above this. */
+const LANES_DISAGREE_SCORE_GAP = 0.4;
 
 function parseUnderlying(raw: string | null): Underlying {
   if (raw === "BANKNIFTY" || raw === "SENSEX" || raw === "NIFTY") return raw;
@@ -361,6 +363,25 @@ export function AnalysisPanel() {
         ? "bg-binance-bear/15 text-binance-bear border-binance-bear/40"
         : "bg-binance-elevated text-binance-muted border-binance-border";
 
+  // SCALP only: bare NEUTRAL can hide Tech vs OF conflict — surface context, not a trade.
+  const lanesDisagreeTechVsFlow = useMemo(() => {
+    if (!data || data.mode !== "SCALP") return false;
+    if (
+      data.directional.verdict !== "NEUTRAL" &&
+      data.structure.branch !== "NO_TRADE"
+    ) {
+      return false;
+    }
+    const tech =
+      data.directional.components.technical ?? data.lanes.technical?.score;
+    const flow =
+      data.directional.components.optionsFlow ?? data.lanes.optionsFlow?.score;
+    if (typeof tech !== "number" || typeof flow !== "number") return false;
+    const opposite =
+      (tech > 0 && flow < 0) || (tech < 0 && flow > 0);
+    return opposite && Math.abs(tech - flow) > LANES_DISAGREE_SCORE_GAP;
+  }, [data]);
+
   const canMark =
     Boolean(data?.tradePlan.suggestedContract) &&
     data?.structure.action !== "NONE" &&
@@ -504,6 +525,15 @@ export function AnalysisPanel() {
                 >
                   {side}
                 </span>
+                {lanesDisagreeTechVsFlow && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded border border-binance-gold/50 bg-binance-gold/10 px-2 py-0.5 text-xs text-binance-gold"
+                    title="Technical and Options Flow scores disagree with opposite signs and |Δ| > 0.4. Verdict stays NEUTRAL / NO_TRADE — context only."
+                  >
+                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                    Lanes disagree — Technical vs Options Flow
+                  </span>
+                )}
                 <span
                   className="rounded border border-binance-border px-2 py-0.5 text-xs text-binance-muted"
                   title={data.experimentalEdge.label}
