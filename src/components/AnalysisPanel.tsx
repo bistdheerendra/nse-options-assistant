@@ -1,7 +1,6 @@
 "use client";
 
 import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
-import { SmcChartOverlaysLegend } from "@/components/analysis/SmcChartOverlays";
 import { SmcSignalCard } from "@/components/analysis/SmcSignalCard";
 import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
@@ -780,10 +779,7 @@ export function AnalysisPanel() {
           </div>
 
           {smcSignal && (
-            <div className="space-y-2">
-              <SmcSignalCard signal={smcSignal} meta={smcMeta ?? undefined} />
-              <SmcChartOverlaysLegend />
-            </div>
+            <SmcSignalCard signal={smcSignal} meta={smcMeta ?? undefined} />
           )}
 
           {data.mode === "SCALP" && data.scalpSignal && (

@@ -19,7 +19,7 @@ import {
   type LogicalRange,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 type Underlying = "NIFTY" | "BANKNIFTY" | "SENSEX";
@@ -83,6 +83,47 @@ type Props = {
 const REFRESH_MS = 30_000;
 /** Reject live patch if LTP is far from last close (wrong series / stale mock). */
 const MAX_LIVE_GAP_PCT = 0.005; // 0.5%
+
+const OVERLAY_STORAGE_KEY = "nse-chart-overlays";
+
+/** Which price-line layers to draw — independent toggles (Clean = all off). */
+type OverlayVisibility = {
+  smc: boolean;
+  /** Entry / SL / TP1 / TP2 from §2.5 synthesis */
+  verdict: boolean;
+  /** Scalp Stage 5 SL-cluster S/R — kept with verdict to avoid a 4th chip */
+  clusters: boolean;
+};
+
+/** Default: Verdict on (Entry/SL/TP), SMC off — avoids the mixed-overlay mess. */
+const DEFAULT_OVERLAYS: OverlayVisibility = {
+  smc: false,
+  verdict: true,
+  clusters: false,
+};
+
+function readOverlayVisibility(): OverlayVisibility {
+  try {
+    const raw = sessionStorage.getItem(OVERLAY_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_OVERLAYS };
+    const parsed = JSON.parse(raw) as Partial<OverlayVisibility>;
+    return {
+      smc: Boolean(parsed.smc),
+      verdict: parsed.verdict !== false,
+      clusters: Boolean(parsed.clusters),
+    };
+  } catch {
+    return { ...DEFAULT_OVERLAYS };
+  }
+}
+
+function writeOverlayVisibility(state: OverlayVisibility) {
+  try {
+    sessionStorage.setItem(OVERLAY_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // private mode / quota — ignore
+  }
+}
 
 type ChartViewState = {
   logical: { from: number; to: number };
@@ -237,25 +278,6 @@ export function AnalysisLiveChart({
   smcLevels,
   compact = false,
 }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const linesRef = useRef<IPriceLine[]>([]);
-  const barsRef = useRef<CandlestickData[]>([]);
-  const liveLtpRef = useRef(liveLtp);
-  const levelsRef = useRef(levels);
-  const clusterRef = useRef(clusterLevels);
-  const smcRef = useRef(smcLevels);
-  /** True after first successful candle paint for current underlying/mode/tf. */
-  const viewInitializedRef = useRef(false);
-  /** Skip session writes while we programmatically restore zoom. */
-  const applyingViewRef = useRef(false);
-  const viewKeyRef = useRef("");
-  liveLtpRef.current = liveLtp;
-  levelsRef.current = levels;
-  clusterRef.current = clusterLevels;
-  smcRef.current = smcLevels;
-
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [demoMode, setDemoMode] = useState(false);
@@ -265,9 +287,80 @@ export function AnalysisLiveChart({
   const [scalpTf, setScalpTf] = useState<ScalpChartTf>("5m");
   const [tfLabel, setTfLabel] = useState(mode === "SCALP" ? "5m" : "1h");
   const [displayLtp, setDisplayLtp] = useState<number | null>(liveLtp);
+  const [overlays, setOverlays] = useState<OverlayVisibility>(DEFAULT_OVERLAYS);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const linesRef = useRef<IPriceLine[]>([]);
+  const barsRef = useRef<CandlestickData[]>([]);
+  const liveLtpRef = useRef(liveLtp);
+  const levelsRef = useRef(levels);
+  const clusterRef = useRef(clusterLevels);
+  const smcRef = useRef(smcLevels);
+  const overlaysRef = useRef(overlays);
+  /** True after first successful candle paint for current underlying/mode/tf. */
+  const viewInitializedRef = useRef(false);
+  /** Skip session writes while we programmatically restore zoom. */
+  const applyingViewRef = useRef(false);
+  const viewKeyRef = useRef("");
+  liveLtpRef.current = liveLtp;
+  levelsRef.current = levels;
+  clusterRef.current = clusterLevels;
+  smcRef.current = smcLevels;
+  overlaysRef.current = overlays;
+
+  // Hydrate overlay prefs after mount (sessionStorage is client-only)
+  useEffect(() => {
+    setOverlays(readOverlayVisibility());
+  }, []);
+
+  // Esc closes fullscreen; lock body scroll while open
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [fullscreen]);
 
   const activeTf = mode === "SCALP" ? scalpTf : "1h";
   viewKeyRef.current = chartViewKey(underlying, mode, activeTf);
+
+  const isClean = !overlays.smc && !overlays.verdict;
+
+  function setOverlayState(next: OverlayVisibility) {
+    setOverlays(next);
+    writeOverlayVisibility(next);
+  }
+
+  function selectClean() {
+    setOverlayState({ smc: false, verdict: false, clusters: false });
+  }
+
+  function toggleSmc() {
+    setOverlayState({
+      ...overlays,
+      smc: !overlays.smc,
+    });
+  }
+
+  function toggleVerdict() {
+    const next = !overlays.verdict;
+    setOverlayState({
+      ...overlays,
+      verdict: next,
+      // Verdict chip = Entry / SL / TP only (clusters off — were mixing with SMC)
+      clusters: false,
+    });
+  }
 
   // Reset default TF when switching Scalp ↔ Swing
   useEffect(() => {
@@ -316,13 +409,10 @@ export function AnalysisLiveChart({
     }
     // SL clusters: solid lines, blue support / violet resistance (not candle colors)
     if (clusters?.length) {
-      // Cap to strongest few so the chart stays readable
+      // Cap nearest few so Verdict layer stays readable next to Entry/SL/TP
       const top = [...clusters]
-        .sort((a, b) => {
-          // prefer stronger labels later if strength embedded; keep order by kind then price
-          return a.price - b.price;
-        })
-        .slice(0, 8);
+        .sort((a, b) => a.price - b.price)
+        .slice(0, 4);
       for (const c of top) {
         if (!Number.isFinite(c.price)) continue;
         linesRef.current.push(
@@ -406,11 +496,12 @@ export function AnalysisLiveChart({
 
     chartRef.current = chart;
     seriesRef.current = series;
+    const o = overlaysRef.current;
     paintPriceLines(
       series,
-      levelsRef.current,
-      clusterRef.current,
-      smcRef.current,
+      o.verdict ? levelsRef.current : null,
+      o.clusters ? clusterRef.current : null,
+      o.smc ? smcRef.current : null,
     );
 
     const persistView = () => {
@@ -542,20 +633,51 @@ export function AnalysisLiveChart({
     seriesRef.current.update(next[next.length - 1]!);
   }, [liveLtp]);
 
-  // Trade-plan + SL-cluster + SMC overlay price lines
+  // Trade-plan + SL-cluster + SMC overlay price lines (respect visibility toggles)
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    paintPriceLines(series, levels, clusterLevels, smcLevels);
+    paintPriceLines(
+      series,
+      overlays.verdict ? levels : null,
+      overlays.clusters ? clusterLevels : null,
+      overlays.smc ? smcLevels : null,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- paintPriceLines is stable enough here
-  }, [levels, clusterLevels, smcLevels]);
+  }, [levels, clusterLevels, smcLevels, overlays]);
 
   return (
-    <div
-      className={`flex h-full flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface ${
-        compact ? "min-h-120 sm:min-h-140" : "min-h-112 sm:min-h-105"
-      }`}
-    >
+    <>
+      {fullscreen && (
+        <div
+          className={`w-full ${
+            compact ? "min-h-120 sm:min-h-140" : "min-h-112 sm:min-h-105"
+          }`}
+          aria-hidden
+        />
+      )}
+      {fullscreen && (
+        <button
+          type="button"
+          aria-label="Close fullscreen chart"
+          className="fixed inset-0 z-[60] cursor-default bg-binance-bg/80"
+          onClick={() => setFullscreen(false)}
+        />
+      )}
+      <div
+        className={
+          fullscreen
+            ? "fixed inset-2 z-[70] flex flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface shadow-2xl sm:inset-4"
+            : `flex h-full flex-col overflow-hidden rounded-lg border border-binance-border bg-binance-surface ${
+                compact ? "min-h-120 sm:min-h-140" : "min-h-112 sm:min-h-105"
+              }`
+        }
+        role={fullscreen ? "dialog" : undefined}
+        aria-modal={fullscreen || undefined}
+        aria-label={
+          fullscreen ? `${underlying} live chart fullscreen` : undefined
+        }
+      >
       <div className="flex flex-wrap items-center gap-2 border-b border-binance-border px-3 py-2.5 sm:px-4 sm:py-3">
         <p className="text-xs font-semibold uppercase tracking-wider text-binance-muted">
           Live chart
@@ -588,22 +710,83 @@ export function AnalysisLiveChart({
         ) : (
           <span className="text-xs text-binance-muted">{tfLabel}</span>
         )}
+        <div
+          className="inline-flex rounded-md bg-binance-elevated p-0.5"
+          role="group"
+          aria-label="Chart overlays"
+        >
+          {(
+            [
+              {
+                id: "clean" as const,
+                label: "Clean",
+                active: isClean,
+                onClick: selectClean,
+                title: "Candles only — hide all overlay lines",
+              },
+              {
+                id: "smc" as const,
+                label: "SMC",
+                active: overlays.smc,
+                onClick: toggleSmc,
+                title: "Smart Money Concepts levels (OB / BSL / SSL / FVG)",
+              },
+              {
+                id: "verdict" as const,
+                label: "Verdict",
+                active: overlays.verdict,
+                onClick: toggleVerdict,
+                title: "Synthesis Entry / SL / TP levels",
+              },
+            ] as const
+          ).map((btn) => (
+            <button
+              key={btn.id}
+              type="button"
+              onClick={btn.onClick}
+              title={btn.title}
+              aria-pressed={btn.active}
+              className={`rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
+                btn.active
+                  ? "bg-binance-gold text-binance-bg"
+                  : "text-binance-muted hover:text-binance-text"
+              }`}
+            >
+              {btn.label}
+            </button>
+          ))}
+        </div>
         <LiveBadge active={live && !loading && !error} />
-        {displayLtp != null && (
-          <span className="ml-auto font-mono text-sm tabular-nums text-binance-text">
-            {displayLtp.toLocaleString("en-IN", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}
-          </span>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          {displayLtp != null && (
+            <span className="font-mono text-sm tabular-nums text-binance-text">
+              {displayLtp.toLocaleString("en-IN", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setFullscreen((v) => !v)}
+            title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen chart"}
+            aria-label={fullscreen ? "Exit fullscreen chart" : "Open chart fullscreen"}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-binance-muted transition-colors hover:bg-binance-elevated hover:text-binance-gold"
+          >
+            {fullscreen ? (
+              <Minimize2 className="h-4 w-4" aria-hidden />
+            ) : (
+              <Maximize2 className="h-4 w-4" aria-hidden />
+            )}
+          </button>
+        </div>
       </div>
 
       <div className="relative min-h-0 flex-1">
         <div ref={containerRef} className="absolute inset-0" />
 
         {loading && (
-          <ChartAiLoader label={underlying} compact={compact} />
+          <ChartAiLoader label={underlying} compact={compact && !fullscreen} />
         )}
 
         {error && !loading && (
@@ -616,7 +799,7 @@ export function AnalysisLiveChart({
         )}
       </div>
 
-      {!compact && (
+      {(!compact || fullscreen) && (
         <p className="border-t border-binance-border px-4 py-2 text-[11px] text-binance-muted">
           {candleSource === "yahoo"
             ? "Yahoo public OHLC · forming bar synced to live spot when within 0.5%"
@@ -626,11 +809,12 @@ export function AnalysisLiveChart({
                 ? "Public OHLC · live spot sync"
                 : "Live OHLC"}
           {" · "}
-          {mode === "SCALP" ? "3m / 5m / 15m pills · " : "1h · "}
-          Entry / SL / TP dashed when synthesis is run
-          {" · "}Scalp SL-clusters: blue support / violet resistance
+          {mode === "SCALP" ? "3m / 5m / 15m · " : "1h · "}
+          Overlays: Clean / SMC / Verdict (SMC + Verdict can both be on)
+          {fullscreen ? " · Esc to exit fullscreen" : ""}
         </p>
       )}
     </div>
+    </>
   );
 }

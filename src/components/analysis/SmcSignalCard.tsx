@@ -1,5 +1,6 @@
 "use client";
 
+import { SmcChartOverlaysLegend } from "@/components/analysis/SmcChartOverlays";
 import { AlertTriangle, Check, X } from "lucide-react";
 import type { SmcSignal } from "@/lib/marketdata/smc";
 
@@ -16,6 +17,7 @@ export type SmcSignalCardProps = {
 /**
  * Read-only SMC confluence card — checklist of pass/fail conditions.
  * NOT wired to §2.5 synthesizer or paper trading.
+ * Overlay legend sits in the right column to fill unused width.
  */
 export function SmcSignalCard({ signal, meta }: SmcSignalCardProps) {
   const entryColor =
@@ -55,26 +57,34 @@ export function SmcSignalCard({ signal, meta }: SmcSignalCardProps) {
         </span>
       </div>
 
-      <div className="space-y-2 px-4 py-3">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-binance-muted">
-          Confluence checklist
-        </p>
-        {signal.checklist.map((item) => (
-          <div
-            key={item.key}
-            className="flex items-start gap-2 text-sm text-binance-text"
-          >
-            {item.passed ? (
-              <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-binance-bull" />
-            ) : (
-              <X className="mt-0.5 h-3.5 w-3.5 shrink-0 text-binance-bear" />
-            )}
-            <div>
-              <span className="font-medium">{item.key.replaceAll("_", " ")}</span>
-              <span className="text-binance-muted"> — {item.detail}</span>
+      <div className="grid gap-4 px-4 py-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] md:gap-6">
+        <div className="min-w-0 space-y-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-binance-muted">
+            Confluence checklist
+          </p>
+          {signal.checklist.map((item) => (
+            <div
+              key={item.key}
+              className="flex items-start gap-2 text-sm text-binance-text"
+            >
+              {item.passed ? (
+                <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-binance-bull" />
+              ) : (
+                <X className="mt-0.5 h-3.5 w-3.5 shrink-0 text-binance-bear" />
+              )}
+              <div>
+                <span className="font-medium">
+                  {item.key.replaceAll("_", " ")}
+                </span>
+                <span className="text-binance-muted"> — {item.detail}</span>
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
+
+        <div className="min-w-0 border-t border-binance-border pt-3 md:border-l md:border-t-0 md:pl-5 md:pt-0">
+          <SmcChartOverlaysLegend embedded />
+        </div>
       </div>
 
       {(signal.exitReason || signal.exitDetail) && (
@@ -89,7 +99,9 @@ export function SmcSignalCard({ signal, meta }: SmcSignalCardProps) {
 
       <div className="flex items-start gap-1.5 border-t border-binance-border px-4 py-3 text-[10px] leading-relaxed text-binance-muted">
         <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-binance-gold" />
-        <span>{signal.disclaimer}. Read-only — does not place paper or live orders.</span>
+        <span>
+          {signal.disclaimer}. Read-only — does not place paper or live orders.
+        </span>
       </div>
     </div>
   );
