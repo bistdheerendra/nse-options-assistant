@@ -167,6 +167,19 @@ type SynthesisPayload = {
     insufficientSample?: boolean;
     legacySampleSize?: number;
   };
+  /** SCALP-only; null on SWING */
+  priceSlopeGate: {
+    slopePct: number;
+    slopeDirection: "up" | "down" | "flat";
+    slopeStrong: boolean;
+    lookbackBars: number;
+    timeframe: string;
+    computable: boolean;
+    applied: boolean;
+    conflictReason: "price_slope_opposes_verdict" | null;
+    preGateVerdict: string | null;
+    preGateStructureBranch: string | null;
+  } | null;
 };
 
 function fmt(n: number | null | undefined, digits = 2): string {
@@ -598,6 +611,30 @@ export function AnalysisPanel() {
                   >
                     <AlertTriangle className="h-3 w-3 shrink-0" />
                     Lanes disagree — Technical vs Options Flow
+                  </span>
+                )}
+                {data.priceSlopeGate?.applied && (
+                  <span
+                    className="inline-flex max-w-full flex-wrap items-center gap-1 rounded border border-binance-bear/50 bg-binance-bear/10 px-2 py-0.5 text-xs text-binance-bear"
+                    title={
+                      data.priceSlopeGate.conflictReason
+                        ? `conflictReason=${data.priceSlopeGate.conflictReason}. Lane scores unchanged — final verdict downgraded to NEUTRAL / NO_TRADE.`
+                        : "Price momentum conflicts with lane verdict"
+                    }
+                  >
+                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                    Verdict downgraded — price momentum conflicts (
+                    {data.priceSlopeGate.slopeDirection}{" "}
+                    {Math.abs(data.priceSlopeGate.slopePct).toFixed(2)}% /{" "}
+                    {data.priceSlopeGate.lookbackBars} bars)
+                    {data.priceSlopeGate.preGateVerdict && (
+                      <span className="font-normal text-binance-muted">
+                        · lanes said {data.priceSlopeGate.preGateVerdict}
+                        {data.priceSlopeGate.preGateStructureBranch
+                          ? ` → ${data.priceSlopeGate.preGateStructureBranch.replaceAll("_", " ")}`
+                          : ""}
+                      </span>
+                    )}
                   </span>
                 )}
                 <span

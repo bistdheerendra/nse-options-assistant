@@ -34,6 +34,7 @@ import {
 import { CURRENT_SYNTHESIS_VERSION } from "@/lib/backtest/synthesisVersion";
 import { computeLaneAlignment } from "./alignment";
 import { synthesizeDirectional } from "./directional";
+import { applyPriceSlopeGate, type PriceSlopeGateOutcome } from "./priceSlopeGate";
 import { detectRegime } from "./regime";
 import { synthesizeStructure } from "./structure";
 import { buildTradePlan } from "./tradePlan";
@@ -81,6 +82,11 @@ export type SynthesisResult = {
   experimentalEdge: ExperimentalEdge;
   spot: number;
   expiry: string;
+  /**
+   * SCALP-only post-synthesis price-slope sanity gate.
+   * null on SWING (deferred — needs own threshold tuning).
+   */
+  priceSlopeGate: PriceSlopeGateOutcome | null;
 };
 
 function daysBetween(a: Date, b: Date): number {
@@ -221,11 +227,33 @@ export async function runSynthesis(params: {
     }
   }
 
-  const directional = synthesizeDirectional(
+  let directional = synthesizeDirectional(
     { technical, optionsFlow, sentiment, macro },
     mode,
   );
-  const structure = synthesizeStructure(directional.verdict, optionsFlow.extras);
+  let structure = synthesizeStructure(directional.verdict, optionsFlow.extras);
+
+  // Post-synthesis price-slope gate — SCALP only. Does not change lane
+  // weights or ±0.15 threshold; only downgrades conflicting FINAL verdict.
+  let priceSlopeGate: PriceSlopeGateOutcome | null = null;
+  if (mode === "SCALP") {
+    const gated = applyPriceSlopeGate({
+      verdict: directional.verdict,
+      structure,
+      candles: scalpCandles ?? [],
+      extras: optionsFlow.extras,
+      timeframe: "5m",
+    });
+    priceSlopeGate = gated.gate;
+    if (gated.gate.applied) {
+      directional = {
+        ...directional,
+        verdict: gated.directionalVerdict,
+        notes: [...directional.notes, ...gated.notes],
+      };
+      structure = gated.structure;
+    }
+  }
 
   if (mode === "SCALP" && scalpLiquidity) {
     const preferredSide =
@@ -263,16 +291,28 @@ export async function runSynthesis(params: {
     ema200: num(technical.rawIndicators.ema200) ?? undefined,
   });
 
-  const alignment = computeLaneAlignment(directional.verdict, {
-    technical,
-    optionsFlow,
-    sentiment,
-    macro,
-  });
+  const alignment = computeLaneAlignment(
+    // When slope gate fired, align against the pre-gate lane verdict so the
+    // "X/Y lanes aligned" label stays auditable against what lanes said.
+    priceSlopeGate?.applied && priceSlopeGate.preGateVerdict
+      ? priceSlopeGate.preGateVerdict
+      : directional.verdict,
+    {
+      technical,
+      optionsFlow,
+      sentiment,
+      macro,
+    },
+  );
 
   const aligningLanes = Object.entries(alignment.perLane)
     .filter(([, v]) => v === "aligned")
     .map(([k]) => k);
+
+  const laneBiasVerdict =
+    priceSlopeGate?.applied && priceSlopeGate.preGateVerdict
+      ? priceSlopeGate.preGateVerdict
+      : directional.verdict;
 
   const tradePlan = buildTradePlan({
     spot: chain.spot,
@@ -284,10 +324,10 @@ export async function runSynthesis(params: {
     swingHigh: num(technical.rawIndicators.swingHigh),
     swingLow: num(technical.rawIndicators.swingLow),
     laneNotes:
-      aligningLanes.length > 0
+      aligningLanes.length > 0 && laneBiasVerdict !== "NEUTRAL"
         ? [
             `${aligningLanes.map((n) => n[0]!.toUpperCase() + n.slice(1)).join(" + ")} lane(s) flag ${
-              directional.verdict === "BULLISH" ? "upside" : "downside"
+              laneBiasVerdict === "BULLISH" ? "upside" : "downside"
             } bias.`,
           ]
         : undefined,
@@ -340,6 +380,7 @@ export async function runSynthesis(params: {
     stopLossClusters,
     oiVelocity,
     scalpSignal,
+    priceSlopeGate,
   };
 
   let tradeIdeaId: string | null = null;
@@ -394,6 +435,7 @@ export async function runSynthesis(params: {
     experimentalEdge,
     spot: chain.spot,
     expiry: chain.expiry,
+    priceSlopeGate,
   };
 }
 
@@ -401,3 +443,9 @@ export { synthesizeDirectional, synthesizeStructure };
 export { buildTradePlan } from "./tradePlan";
 export { detectRegime } from "./regime";
 export { computeLaneAlignment } from "./alignment";
+export {
+  applyPriceSlopeGate,
+  computePriceSlope,
+  SLOPE_LOOKBACK_BARS,
+  SLOPE_STRONG_THRESHOLD_PCT,
+} from "./priceSlopeGate";

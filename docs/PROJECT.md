@@ -65,6 +65,29 @@ On SCALP only, classic Technical still scores EMA50/200 on **5m** bars (`EMA_STA
 
 When SCALP verdict is NEUTRAL / structure `NO_TRADE` and Technical vs Options Flow have **opposite signs** with `|tech − flow| > 0.4`, the Analysis verdict card shows **“Lanes disagree — Technical vs Options Flow”**. Does not change the trade decision.
 
+### SCALP price-slope gate (post-synthesis sanity check)
+
+**Problem:** Lane scores alone can print LONG (Buy CE / Sell PE) or SHORT while the last few 5m bars are clearly dumping/rallying the other way (RSI mean-reversion, elevated PCR as contrarian-bullish, lagging EMA50>EMA200).
+
+**Module:** `src/lib/synthesis/priceSlopeGate.ts` — pure function; **not** a new lane and **does not** change lane weights or the ±0.15 neutral threshold.
+
+**Formula (SCALP primary TF = 5m):**
+```
+SLOPE_LOOKBACK_BARS = 5
+SLOPE_STRONG_THRESHOLD_PCT = 0.15   // tune from real data
+
+slopePct = (lastClose − closeNBarsAgo) / closeNBarsAgo × 100
+slopeStrong = |slopePct| ≥ SLOPE_STRONG_THRESHOLD_PCT
+```
+
+**Gate (SCALP only):** If lane verdict is BULLISH and slope is strong **down**, or BEARISH and slope is strong **up** → downgrade final verdict to **NEUTRAL** / structure **NO_TRADE**, set `conflictReason = "price_slope_opposes_verdict"`, and keep `preGateVerdict` + `preGateStructureBranch` + original `combinedScore` / lane components for audit. Applies equally to Buy CE and Sell PE LONG structures (Sell PE is not treated more leniently).
+
+**Does not change:** lane weights, ±0.15 threshold, SMC (still unwired), SWING mode (deferred — 1h needs its own lookback/threshold; ask before extending).
+
+**Auto-paper:** Already requires `structure.action` ∈ {BUY, SELL}; a NEUTRAL/NO_TRADE downgrade naturally skips open — no second gate added.
+
+**UI:** Distinct bear-tinted badge on the Analysis verdict card (not the gold “Lanes disagree” badge), e.g. “Verdict downgraded — price momentum conflicts (down 0.22% / 5 bars)” with muted pre-gate lane verdict.
+
 ## 3. Scalp / Swing mode
 
 | Mode | Timeframes | Weight emphasis |
@@ -498,6 +521,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - SCALP EMA dampen: when Stage-8 MTF confluence (3m+5m+15m) strongly opposes classic EMA50/200 stack, multiply EMA term by `EMA_DAMPEN_FACTOR` (0.5) before `technicalBiasAdj`; SWING untouched
 - SCALP fast EMA10/20 momentum term (`FAST_EMA_TERM_WEIGHT = 0.20`) on same 5m series; EMA50/200 SCALP base weight 0.35 → 0.25 (`EMA_STACK_SCALP_WEIGHT`); SWING stays 50/200 only at 0.35
 - SCALP Analysis UI: “Lanes disagree — Technical vs Options Flow” badge on NEUTRAL/NO_TRADE when Tech vs OF opposite signs and |Δ| > 0.4 (context only — still NO_TRADE)
+- SCALP price-slope gate (`priceSlopeGate.ts`): post-synthesis sanity check — strong 5-bar 5m slope opposing BULLISH/BEARISH downgrades to NEUTRAL/NO_TRADE (`conflictReason=price_slope_opposes_verdict`); pre-gate verdict kept for audit; UI bear badge distinct from lanes-disagree; SWING deferred; `npx tsx scripts/test-price-slope-gate.ts`
 - Scalp auto-paper (opt-in): UI toggle + `/api/cron/scalp-auto-paper` opens paper when rule stack cleared; dedupe OPEN; sell ack required; paper only
 - SMC Stages 1–8 (standalone/read-only, **not** in §2.5): full pipeline through `smcSignal` + `GET /api/smc` + `SmcSignalCard` / overlay legend + theme.smc* tokens; TTL 45s; `test:smc-structure` … `test:smc-signal`
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
@@ -528,6 +552,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Upstash Redis pub/sub for scalp second-level polling
 - Multi-instance Redis fan-out for Angel option/index ticks (single-process in-memory hubs today); full-chain (non-ATM) WebSocket subscribe
 - Real broker order placement (intentionally out of scope)
+- SWING price-slope gate (SCALP shipped; 1h needs separate `SLOPE_LOOKBACK_BARS` / `SLOPE_STRONG_THRESHOLD_PCT` — ask before extending)
 
 ## External Data Sources
 
