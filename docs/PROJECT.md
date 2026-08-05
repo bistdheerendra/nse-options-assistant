@@ -65,28 +65,34 @@ On SCALP only, classic Technical still scores EMA50/200 on **5m** bars (`EMA_STA
 
 When SCALP verdict is NEUTRAL / structure `NO_TRADE` and Technical vs Options Flow have **opposite signs** with `|tech − flow| > 0.4`, the Analysis verdict card shows **“Lanes disagree — Technical vs Options Flow”**. Does not change the trade decision.
 
-### SCALP price-slope gate (post-synthesis sanity check)
+### Price-slope gate (post-synthesis sanity check)
 
-**Problem:** Lane scores alone can print LONG (Buy CE / Sell PE) or SHORT while the last few 5m bars are clearly dumping/rallying the other way (RSI mean-reversion, elevated PCR as contrarian-bullish, lagging EMA50>EMA200).
+**Problem:** Lane scores alone can print LONG (Buy CE / Sell PE) or SHORT while recent bars are clearly dumping/rallying the other way (RSI mean-reversion, elevated PCR as contrarian-bullish, lagging EMA50>EMA200).
 
 **Module:** `src/lib/synthesis/priceSlopeGate.ts` — pure function; **not** a new lane and **does not** change lane weights or the ±0.15 neutral threshold.
 
-**Formula (SCALP primary TF = 5m):**
+**Formula (mode-specific constants — never share SCALP↔SWING numbers):**
 ```
-SLOPE_LOOKBACK_BARS = 5
-SLOPE_STRONG_THRESHOLD_PCT = 0.15   // tune from real data
-
 slopePct = (lastClose − closeNBarsAgo) / closeNBarsAgo × 100
-slopeStrong = |slopePct| ≥ SLOPE_STRONG_THRESHOLD_PCT
+slopeStrong = |slopePct| ≥ strongThresholdPct
 ```
 
-**Gate (SCALP only):** If lane verdict is BULLISH and slope is strong **down**, or BEARISH and slope is strong **up** → downgrade final verdict to **NEUTRAL** / structure **NO_TRADE**, set `conflictReason = "price_slope_opposes_verdict"`, and keep `preGateVerdict` + `preGateStructureBranch` + original `combinedScore` / lane components for audit. Applies equally to Buy CE and Sell PE LONG structures (Sell PE is not treated more leniently).
+| Mode | Primary TF | Lookback | Strong threshold | Rationale |
+|------|------------|---------:|-----------------:|-----------|
+| SCALP | 5m | `SCALP_SLOPE_LOOKBACK_BARS = 5` | `SCALP_SLOPE_STRONG_THRESHOLD_PCT = 0.15` | Short-horizon scalp tape |
+| SWING | 1h | `SWING_SLOPE_LOOKBACK_BARS = 15` | `SWING_SLOPE_STRONG_THRESHOLD_PCT = 0.35` | See below |
 
-**Does not change:** lane weights, ±0.15 threshold, SMC (still unwired), SWING mode (deferred — 1h needs its own lookback/threshold; ask before extending).
+**SWING lookback (15):** NSE cash session ≈ 6.25h → 15 × 1h ≈ **2–2.5 trading days**. Fits Swing’s multi-day hold (5 bars = 5h too short for a “trend conflict”; 20 ≈ 3 days is the other end of the 10–20 band — 15 is mid).
+
+**SWING threshold (0.35%):** From live Angel 1h series (NIFTY+BANKNIFTY+SENSEX, n=618 windows @ lookback=15; feed returned ~221 bars / ~9 calendar days): |slope| p80≈0.21%, p90≈0.26%, p95≈0.32%, p99≈0.38%, max≈0.42%. Reusing SCALP **0.15%** fires **~40%** of windows (ordinary 1h noise). **0.35%** sits above p95 / fires ~3% in that sample — “strong” without a guess. Retune if a longer multi-regime history window becomes available (Angel response currently caps ~221 × 1h regardless of requested lookback days).
+
+**Gate (SCALP + SWING):** If lane verdict is BULLISH and slope is strong **down**, or BEARISH and slope is strong **up** → downgrade final verdict to **NEUTRAL** / structure **NO_TRADE**, set `conflictReason = "price_slope_opposes_verdict"`, and keep `preGateVerdict` + `preGateStructureBranch` + original `combinedScore` / lane components for audit. Applies equally to Buy CE and Sell PE LONG structures (Sell PE is not treated more leniently).
+
+**Does not change:** lane weights, ±0.15 threshold, SMC (still unwired).
 
 **Auto-paper:** Already requires `structure.action` ∈ {BUY, SELL}; a NEUTRAL/NO_TRADE downgrade naturally skips open — no second gate added.
 
-**UI:** Distinct bear-tinted badge on the Analysis verdict card (not the gold “Lanes disagree” badge), e.g. “Verdict downgraded — price momentum conflicts (down 0.22% / 5 bars)” with muted pre-gate lane verdict.
+**UI:** Distinct bear-tinted badge on the Analysis verdict card (not the gold “Lanes disagree” badge), e.g. “Verdict downgraded — price momentum conflicts (down 0.50% / 15 bars)” with muted pre-gate lane verdict.
 
 ## 3. Scalp / Swing mode
 
@@ -99,7 +105,7 @@ slopeStrong = |slopePct| ≥ SLOPE_STRONG_THRESHOLD_PCT
 - Swing surfaces days-to-expiry and Theta-vs-directional-gain warnings.
 - Trade plan ATR multiples: Scalp **1.25×ATR**, Swing **2.25×ATR**; TP1/TP2 at 1:2 / 1:3 vs risk.
 - Suggested contract: ATM-ish from live option chain for Mark as taken → paper.
-- **TODO:** Scalp near-real-time polling (seconds) may need Upstash Redis pub/sub — not yet implemented; current path is request-time fetch + periodic `poll:scalp-candles` job.
+- **Scalp MTF push (single-instance):** in-process `scalpCandleHub` + SSE `GET /api/scalp/candles/stream?underlying=…` delivers candle bundles on content-hash change (last bar close/volume per TF). Request-time fetch and `poll:scalp-candles` both publish into the hub; the external poll job reaches the Next process via soft-watch (`cacheGet` only — no extra Angel calls; Upstash or `.data/shared-cache.json` fallback). Client `useScalpCandlesLiveStream` falls back to polling `GET /api/scalp/candles` if the stream errors. Not Redis pub/sub / not multi-instance fan-out.
 
 ### 3.1 Scalping Mode — multi-timeframe candle pipeline (Stage 1)
 
@@ -122,6 +128,7 @@ Max days / request: 30 / 60 / 100 / 200 respectively. We request shorter windows
 3. In-process TTL (~45s) + optional Upstash Redis key `scalp:mtf:{underlying}` coalesce request-time callers.
 4. Job: `npm run poll:scalp-candles` walks all three underlyings with an extra ~800ms gap — force-refresh, no silent parallel hammering.
 5. API: `GET /api/scalp/candles?underlying=NIFTY` (optional `&interval=ONE_MINUTE`).
+6. Push: successful bundles publish to `scalpCandleHub` (content-hash idempotent); SSE `GET /api/scalp/candles/stream` sends last-known immediately (incl. demo / `db_cache` labeled), then live updates.
 
 **Storage note:** Locked stack is Prisma → Postgres (Supabase). Timescale hypertables are **not** wired; `MarketCandle` is a normal Postgres table suitable for scalp lookbacks. Timescale remains listed under Not Yet for longer IV/candle history.
 
@@ -511,6 +518,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - docs/PROJECT.md + README + `.env.example`
 - Stage 1: Angel One auth, LTP, candles, option chain, throttle/retry, `/api/marketdata/test`
 - Scalp Stage 1: Multi-TF candle pipeline (`src/lib/marketdata/scalp/`) — Angel 1m/3m/5m/15m sequential fetch, Postgres `MarketCandle` upsert, Redis/TTL cache, `GET /api/scalp/candles`, `npm run poll:scalp-candles`; DB-cache / demo degrade path documented in §3.1
+- Scalp candle SSE push: in-process `scalpCandleHub` + `GET /api/scalp/candles/stream` (content-hash idempotent; last-known seed incl. demo/`db_cache`); Analysis `useScalpCandlesLiveStream` with REST poll fallback on stream error; Redis soft-watch bridges external `poll:scalp-candles` without extra Angel calls (single-instance only)
 - Scalp Stage 2: Per-TF price action (`priceAction.ts`) — engulfing/doji/hammer/shooting-star/inside-bar + HH/HL structure + candle strength; `?priceAction=1` on scalp candles API; `npm run test:scalp-pa`
 - Scalp Stage 3: Volume confirm/disqualify (`volume.ts`) — lookback=20, spike≥1.5×avg, weak<0.6×avg; adjusts PA confidence (±0.15 / −0.25); `?volume=1`; `npm run test:scalp-volume`
 - Scalp Stage 4: Liquidity gate (`liquidity.ts` + `LiquidityStatusBadge`) — spread/volume/OI ATM-band; hard unsuitable-for-scalping fail; synthesis `scalpLiquidity`; `npm run test:scalp-liquidity`
@@ -521,7 +529,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - SCALP EMA dampen: when Stage-8 MTF confluence (3m+5m+15m) strongly opposes classic EMA50/200 stack, multiply EMA term by `EMA_DAMPEN_FACTOR` (0.5) before `technicalBiasAdj`; SWING untouched
 - SCALP fast EMA10/20 momentum term (`FAST_EMA_TERM_WEIGHT = 0.20`) on same 5m series; EMA50/200 SCALP base weight 0.35 → 0.25 (`EMA_STACK_SCALP_WEIGHT`); SWING stays 50/200 only at 0.35
 - SCALP Analysis UI: “Lanes disagree — Technical vs Options Flow” badge on NEUTRAL/NO_TRADE when Tech vs OF opposite signs and |Δ| > 0.4 (context only — still NO_TRADE)
-- SCALP price-slope gate (`priceSlopeGate.ts`): post-synthesis sanity check — strong 5-bar 5m slope opposing BULLISH/BEARISH downgrades to NEUTRAL/NO_TRADE (`conflictReason=price_slope_opposes_verdict`); pre-gate verdict kept for audit; UI bear badge distinct from lanes-disagree; SWING deferred; `npx tsx scripts/test-price-slope-gate.ts`
+- SCALP + SWING price-slope gate (`priceSlopeGate.ts`): post-synthesis sanity check — strong opposing slope downgrades to NEUTRAL/NO_TRADE (`conflictReason=price_slope_opposes_verdict`); SCALP 5×5m @ 0.15%, SWING 15×1h @ 0.35% (empirical; not shared); pre-gate verdict kept; UI bear badge; `npm run test:price-slope`
 - Scalp auto-paper (opt-in): UI toggle + `/api/cron/scalp-auto-paper` opens paper when rule stack cleared; dedupe OPEN; sell ack required; paper only
 - SMC Stages 1–8 (standalone/read-only, **not** in §2.5): full pipeline through `smcSignal` + `GET /api/smc` + `SmcSignalCard` / overlay legend + theme.smc* tokens; TTL 45s; `test:smc-structure` … `test:smc-signal`
 - Stage 2: Technical + Options Flow lanes + `npm run test:lanes`
@@ -549,10 +557,8 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
 - Exchange holiday calendar for session open/closed (current `marketHours` is weekday + regular hours only)
 - TimescaleDB hypertables for long-horizon IV / candle history (scalp candles use Postgres `MarketCandle` for now; IV trend still live + candle-derived proxy)
-- Upstash Redis pub/sub for scalp second-level polling
-- Multi-instance Redis fan-out for Angel option/index ticks (single-process in-memory hubs today); full-chain (non-ATM) WebSocket subscribe
+- Multi-instance Redis fan-out for scalp candle SSE / Angel option/index ticks (single-process in-memory hubs today — `scalpCandleHub`, `liveQuoteHub`, `liveOptionChainHub`); full-chain (non-ATM) WebSocket subscribe
 - Real broker order placement (intentionally out of scope)
-- SWING price-slope gate (SCALP shipped; 1h needs separate `SLOPE_LOOKBACK_BARS` / `SLOPE_STRONG_THRESHOLD_PCT` — ask before extending)
 
 ## External Data Sources
 
@@ -570,7 +576,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 | Mr Chartist FII/DII API (`fii-diidata.mrchartist.com/api/data`) | Sentiment lane FII/DII fallback (NSE-sourced mirror) | Free unofficial | Soft / polite limits; evening provisional | Sentiment news-only partial score if this and NSE both fail |
 | NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY | Free public | Cookie session + soft rate limits; SENSEX not on this API | Angel One quote FULL; then labeled demo mocks |
 | Postgres (Supabase) via Prisma | Paper account, positions, trade ideas, backtest outcomes, **scalp `MarketCandle` OHLCV** (1m/3m/5m/15m) | Per Supabase plan | Pooler cold starts / network blips | In-memory + `.data/paper-account.json` mirror after successful read; file-only store if no `DATABASE_URL`; scalp fetch still works without DB (no persist / no DB-cache fallback) |
-| Upstash Redis | Optional cache; future scalp pub/sub | Free tier limits apply | Per-plan | No-op client when env missing |
+| Upstash Redis | Optional cache for MTF bundles (`scalp:mtf:{underlying}`) + other TTLs; REST client only (no pub/sub) | Free tier limits apply | Per-plan | When env missing, `cacheGet`/`cacheSet` fall back to `.data/shared-cache.json` so local `poll:scalp-candles` → soft-watch still bridges; scalp SSE uses in-process hub + soft-watch (not Redis pub/sub) |
 
 ## Build order (reference)
 

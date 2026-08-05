@@ -83,8 +83,9 @@ export type SynthesisResult = {
   spot: number;
   expiry: string;
   /**
-   * SCALP-only post-synthesis price-slope sanity gate.
-   * null on SWING (deferred — needs own threshold tuning).
+   * Post-synthesis price-slope sanity gate (SCALP 5m + SWING 1h).
+   * Mode-specific lookback/threshold — never null when candles computable;
+   * still attached with applied=false when no conflict.
    */
   priceSlopeGate: PriceSlopeGateOutcome | null;
 };
@@ -124,8 +125,9 @@ export async function runSynthesis(params: {
   const mode = params.mode ?? "SWING";
   const chain = await getOptionChain(params.underlying, params.expiry);
 
-  // Scalp uses 5m candles for clusters; swing keeps hour series via technical lane.
+  // Primary TF candles: SCALP 5m (clusters + gate); SWING 1h (technical + gate).
   let scalpCandles: OhlcvCandle[] | undefined;
+  let swingCandles: OhlcvCandle[] | undefined;
   if (mode === "SCALP") {
     try {
       scalpCandles = await getUnderlyingCandles(
@@ -136,13 +138,23 @@ export async function runSynthesis(params: {
     } catch {
       scalpCandles = undefined;
     }
+  } else {
+    try {
+      swingCandles = await getUnderlyingCandles(
+        params.underlying,
+        "ONE_HOUR",
+        60,
+      );
+    } catch {
+      swingCandles = undefined;
+    }
   }
 
   const [technicalRaw, optionsFlow, sentiment, macro] = await Promise.all([
     runTechnicalLane({
       underlying: params.underlying,
       mode,
-      candles: scalpCandles,
+      candles: mode === "SCALP" ? scalpCandles : swingCandles,
     }),
     runOptionsFlowLane({
       underlying: params.underlying,
@@ -233,16 +245,18 @@ export async function runSynthesis(params: {
   );
   let structure = synthesizeStructure(directional.verdict, optionsFlow.extras);
 
-  // Post-synthesis price-slope gate — SCALP only. Does not change lane
-  // weights or ±0.15 threshold; only downgrades conflicting FINAL verdict.
+  // Post-synthesis price-slope gate — SCALP (5m) + SWING (1h). Does not
+  // change lane weights or ±0.15 threshold; only downgrades conflicting FINAL verdict.
   let priceSlopeGate: PriceSlopeGateOutcome | null = null;
-  if (mode === "SCALP") {
+  {
+    const gateCandles =
+      mode === "SCALP" ? (scalpCandles ?? []) : (swingCandles ?? []);
     const gated = applyPriceSlopeGate({
       verdict: directional.verdict,
       structure,
-      candles: scalpCandles ?? [],
+      candles: gateCandles,
       extras: optionsFlow.extras,
-      timeframe: "5m",
+      mode,
     });
     priceSlopeGate = gated.gate;
     if (gated.gate.applied) {
@@ -446,6 +460,11 @@ export { computeLaneAlignment } from "./alignment";
 export {
   applyPriceSlopeGate,
   computePriceSlope,
+  slopeParamsForMode,
+  SCALP_SLOPE_LOOKBACK_BARS,
+  SCALP_SLOPE_STRONG_THRESHOLD_PCT,
+  SWING_SLOPE_LOOKBACK_BARS,
+  SWING_SLOPE_STRONG_THRESHOLD_PCT,
   SLOPE_LOOKBACK_BARS,
   SLOPE_STRONG_THRESHOLD_PCT,
 } from "./priceSlopeGate";

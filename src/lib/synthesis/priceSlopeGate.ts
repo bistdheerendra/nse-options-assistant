@@ -3,24 +3,48 @@
  * This is a sanity gate on the FINAL verdict, not a new scoring input —
  * it does not touch §2.5 lane weights or the ±0.15 neutral threshold.
  *
- * SCALP only for now (5m primary TF). SWING needs its own lookback /
- * threshold — ask before extending.
+ * Mode-specific lookback / strong-threshold (do NOT share SCALP↔SWING numbers).
  */
 
 import type { OhlcvCandle } from "@/lib/marketdata/angelone";
+import type { OptionsFlowExtras } from "@/lib/lanes/optionsFlow";
+import type { TradingMode } from "@/lib/lanes/types";
 import type { DirectionalVerdict } from "./directional";
 import type { StructureResult } from "./structure";
 import { synthesizeStructure } from "./structure";
-import type { OptionsFlowExtras } from "@/lib/lanes/optionsFlow";
 
-/** Last N bars on the mode's primary TF (5m Scalp). */
-export const SLOPE_LOOKBACK_BARS = 5;
+/** SCALP: last N bars on 5m primary TF. */
+export const SCALP_SLOPE_LOOKBACK_BARS = 5;
+/**
+ * SCALP: % move over lookback considered "strong" on 5m.
+ * Tuned for short-horizon scalp tape — do not reuse on 1h.
+ */
+export const SCALP_SLOPE_STRONG_THRESHOLD_PCT = 0.15;
 
 /**
- * % move over lookback bars considered a "strong" slope.
- * Named constant — tune from real data, not guessed.
+ * SWING: last N × 1h bars.
+ * NSE cash session ≈ 6.25h → 15 bars ≈ 2–2.5 trading days — long enough to
+ * represent a multi-day swing "trend conflict", short enough not to lag a
+ * full week past the trade horizon. (5 bars = 5h is too short at this TF;
+ * 20 ≈ 3 days is an alternate — 15 chosen as mid of the 10–20 band.)
  */
-export const SLOPE_STRONG_THRESHOLD_PCT = 0.15;
+export const SWING_SLOPE_LOOKBACK_BARS = 15;
+
+/**
+ * SWING: % move over lookback considered "strong" on 1h.
+ * From live Angel 1h series (NIFTY+BANKNIFTY+SENSEX, n=618 windows @ lb=15,
+ * ~9 calendar days available from feed): |slope| p80≈0.21%, p90≈0.26%,
+ * p95≈0.32%, p99≈0.38%, max≈0.42%. SCALP's 0.15% fires ~40% of windows
+ * (ordinary 1h noise). 0.35% ≈ above p95 / fires ~3% in that sample —
+ * "strong" without copying the 5m constant. Retune if a multi-regime
+ * history window becomes available (this feed capped ~221 bars).
+ */
+export const SWING_SLOPE_STRONG_THRESHOLD_PCT = 0.35;
+
+/** @deprecated Prefer SCALP_SLOPE_LOOKBACK_BARS — kept for existing imports/tests. */
+export const SLOPE_LOOKBACK_BARS = SCALP_SLOPE_LOOKBACK_BARS;
+/** @deprecated Prefer SCALP_SLOPE_STRONG_THRESHOLD_PCT */
+export const SLOPE_STRONG_THRESHOLD_PCT = SCALP_SLOPE_STRONG_THRESHOLD_PCT;
 
 export type SlopeDirection = "up" | "down" | "flat";
 
@@ -30,13 +54,15 @@ export type PriceSlopeGateResult = {
   slopeStrong: boolean;
   lookbackBars: number;
   timeframe: string;
+  /** Threshold used for slopeStrong (mode-specific). */
+  strongThresholdPct: number;
   /** True when enough candles existed to compute a slope. */
   computable: boolean;
 };
 
 export type PriceSlopeConflictReason = "price_slope_opposes_verdict";
 
-/** Full SCALP gate outcome attached to SynthesisResult (null on SWING). */
+/** Gate outcome attached to SynthesisResult (SCALP + SWING). */
 export type PriceSlopeGateOutcome = PriceSlopeGateResult & {
   /** Gate fired and downgraded BULLISH/BEARISH → NEUTRAL. */
   applied: boolean;
@@ -46,6 +72,25 @@ export type PriceSlopeGateOutcome = PriceSlopeGateResult & {
   preGateStructureBranch: StructureResult["branch"] | null;
 };
 
+export function slopeParamsForMode(mode: TradingMode): {
+  lookbackBars: number;
+  strongThresholdPct: number;
+  timeframe: string;
+} {
+  if (mode === "SCALP") {
+    return {
+      lookbackBars: SCALP_SLOPE_LOOKBACK_BARS,
+      strongThresholdPct: SCALP_SLOPE_STRONG_THRESHOLD_PCT,
+      timeframe: "5m",
+    };
+  }
+  return {
+    lookbackBars: SWING_SLOPE_LOOKBACK_BARS,
+    strongThresholdPct: SWING_SLOPE_STRONG_THRESHOLD_PCT,
+    timeframe: "1h",
+  };
+}
+
 /**
  * slopePct = (lastClose − closeNBarsAgo) / closeNBarsAgo × 100
  * Uses the most recent bars from the primary TF series (includes forming
@@ -53,10 +98,16 @@ export type PriceSlopeGateOutcome = PriceSlopeGateResult & {
  */
 export function computePriceSlope(
   candles: OhlcvCandle[],
-  opts?: { lookbackBars?: number; timeframe?: string },
+  opts?: {
+    lookbackBars?: number;
+    timeframe?: string;
+    strongThresholdPct?: number;
+  },
 ): PriceSlopeGateResult {
-  const lookbackBars = opts?.lookbackBars ?? SLOPE_LOOKBACK_BARS;
+  const lookbackBars = opts?.lookbackBars ?? SCALP_SLOPE_LOOKBACK_BARS;
   const timeframe = opts?.timeframe ?? "5m";
+  const strongThresholdPct =
+    opts?.strongThresholdPct ?? SCALP_SLOPE_STRONG_THRESHOLD_PCT;
 
   if (candles.length < lookbackBars + 1) {
     return {
@@ -65,6 +116,7 @@ export function computePriceSlope(
       slopeStrong: false,
       lookbackBars,
       timeframe,
+      strongThresholdPct,
       computable: false,
     };
   }
@@ -85,6 +137,7 @@ export function computePriceSlope(
       slopeStrong: false,
       lookbackBars,
       timeframe,
+      strongThresholdPct,
       computable: false,
     };
   }
@@ -93,7 +146,7 @@ export function computePriceSlope(
   const slopePct = ((lastClose - closeNBarsAgo) / closeNBarsAgo) * 100;
   const slopeDirection: SlopeDirection =
     slopePct > 0 ? "up" : slopePct < 0 ? "down" : "flat";
-  const slopeStrong = Math.abs(slopePct) >= SLOPE_STRONG_THRESHOLD_PCT;
+  const slopeStrong = Math.abs(slopePct) >= strongThresholdPct;
 
   return {
     slopePct,
@@ -101,6 +154,7 @@ export function computePriceSlope(
     slopeStrong,
     lookbackBars,
     timeframe,
+    strongThresholdPct,
     computable: true,
   };
 }
@@ -127,7 +181,7 @@ export type ApplyPriceSlopeGateParams = {
   structure: StructureResult;
   candles: OhlcvCandle[];
   extras: OptionsFlowExtras;
-  timeframe?: string;
+  mode: TradingMode;
 };
 
 export type ApplyPriceSlopeGateResult = {
@@ -139,14 +193,13 @@ export type ApplyPriceSlopeGateResult = {
 };
 
 /**
- * Post-synthesis check (SCALP path). Pure — does not mutate lane scores.
+ * Post-synthesis check (SCALP + SWING). Pure — does not mutate lane scores.
  */
 export function applyPriceSlopeGate(
   params: ApplyPriceSlopeGateParams,
 ): ApplyPriceSlopeGateResult {
-  const slope = computePriceSlope(params.candles, {
-    timeframe: params.timeframe ?? "5m",
-  });
+  const cfg = slopeParamsForMode(params.mode);
+  const slope = computePriceSlope(params.candles, cfg);
 
   const conflicts = verdictConflictsWithSlope(params.verdict, slope);
 

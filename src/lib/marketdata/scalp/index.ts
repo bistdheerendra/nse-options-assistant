@@ -1,6 +1,7 @@
 export * from "./types";
 export * from "./candleStore";
 export * from "./multiTimeframeCandles";
+export * from "./scalpCandleHub";
 export * from "./priceAction";
 export * from "./volume";
 export * from "./liquidity";

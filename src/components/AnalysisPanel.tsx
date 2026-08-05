@@ -9,6 +9,7 @@ import { ModeToggle } from "@/components/ModeToggle";
 import { ScalpSignalCard } from "@/components/ScalpSignalCard";
 import type { SmcSignal } from "@/lib/marketdata/smc";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
+import { useScalpCandlesLiveStream } from "@/hooks/useScalpCandlesLiveStream";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -167,13 +168,14 @@ type SynthesisPayload = {
     insufficientSample?: boolean;
     legacySampleSize?: number;
   };
-  /** SCALP-only; null on SWING */
+  /** SCALP 5m + SWING 1h post-synthesis gate */
   priceSlopeGate: {
     slopePct: number;
     slopeDirection: "up" | "down" | "flat";
     slopeStrong: boolean;
     lookbackBars: number;
     timeframe: string;
+    strongThresholdPct?: number;
     computable: boolean;
     applied: boolean;
     conflictReason: "price_slope_opposes_verdict" | null;
@@ -313,6 +315,9 @@ export function AnalysisPanel() {
     return card && Number.isFinite(card.ltp) ? card.ltp : null;
   }, [cards, underlying]);
 
+  // Scalp MTF candles: SSE push with REST poll fallback (delivery only).
+  const scalpMtf = useScalpCandlesLiveStream(underlying, mode === "SCALP");
+
   const run = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -332,6 +337,19 @@ export function AnalysisPanel() {
       setLoading(false);
     }
   }, [underlying, mode]);
+
+  // Soft-refresh synthesis when MTF content hash changes (skip first seed frame).
+  const scalpMtfHashRef = useRef<string | null>(null);
+  useEffect(() => {
+    scalpMtfHashRef.current = null;
+  }, [underlying]);
+  useEffect(() => {
+    if (mode !== "SCALP" || !scalpMtf.contentHash) return;
+    if (scalpMtfHashRef.current === scalpMtf.contentHash) return;
+    const prev = scalpMtfHashRef.current;
+    scalpMtfHashRef.current = scalpMtf.contentHash;
+    if (prev != null) void run();
+  }, [mode, scalpMtf.contentHash, run]);
 
   // Standalone SMC fetch — not part of §2.5 synthesis
   useEffect(() => {
@@ -817,6 +835,47 @@ export function AnalysisPanel() {
 
           {smcSignal && (
             <SmcSignalCard signal={smcSignal} meta={smcMeta ?? undefined} />
+          )}
+
+          {data.mode === "SCALP" && (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-binance-muted">
+              <span
+                className={
+                  scalpMtf.live
+                    ? "inline-flex items-center gap-1 font-medium text-binance-bull"
+                    : scalpMtf.polling
+                      ? "inline-flex items-center gap-1 font-medium text-binance-gold"
+                      : "inline-flex items-center gap-1"
+                }
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    scalpMtf.live
+                      ? "animate-pulse bg-binance-bull"
+                      : scalpMtf.polling
+                        ? "bg-binance-gold"
+                        : "bg-binance-muted"
+                  }`}
+                />
+                {scalpMtf.live
+                  ? "MTF LIVE"
+                  : scalpMtf.polling
+                    ? "MTF poll fallback"
+                    : "MTF idle"}
+              </span>
+              {scalpMtf.degraded && (
+                <span className="text-binance-gold">degraded</span>
+              )}
+              {scalpMtf.fetchedAt && (
+                <span>
+                  candles{" "}
+                  {new Date(scalpMtf.fetchedAt).toLocaleTimeString("en-IN")}
+                </span>
+              )}
+              {scalpMtf.error && !scalpMtf.bundle && (
+                <span className="text-binance-bear">{scalpMtf.error}</span>
+              )}
+            </div>
           )}
 
           {data.mode === "SCALP" && data.scalpSignal && (

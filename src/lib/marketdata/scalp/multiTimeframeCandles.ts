@@ -7,6 +7,7 @@ import {
 import { cacheGet, cacheSet } from "@/lib/redis";
 import { withTtlCache } from "@/lib/marketdata/ttlCache";
 import { readStoredCandles, upsertMarketCandles } from "./candleStore";
+import { scalpCandleHub } from "./scalpCandleHub";
 import {
   SCALP_CANDLE_BUNDLE_TTL_SEC,
   SCALP_LOOKBACK_DAYS,
@@ -131,21 +132,28 @@ export async function getMultiTimeframeCandles(
 
   if (!opts?.forceRefresh) {
     const fromRedis = await cacheGet<MultiTimeframeCandleBundle>(cacheKey);
-    if (fromRedis) return fromRedis;
+    if (fromRedis) {
+      // Delivery only — content-hash hub dedupes identical bars.
+      scalpCandleHub.publish(fromRedis);
+      return fromRedis;
+    }
 
-    return withTtlCache(
+    const bundle = await withTtlCache(
       cacheKey,
       SCALP_CANDLE_BUNDLE_TTL_SEC * 1000,
       async () => {
-        const bundle = await buildMultiTimeframeBundle(underlying);
-        await cacheSet(cacheKey, bundle, SCALP_CANDLE_BUNDLE_TTL_SEC);
-        return bundle;
+        const built = await buildMultiTimeframeBundle(underlying);
+        await cacheSet(cacheKey, built, SCALP_CANDLE_BUNDLE_TTL_SEC);
+        return built;
       },
     );
+    scalpCandleHub.publish(bundle);
+    return bundle;
   }
 
   const bundle = await buildMultiTimeframeBundle(underlying);
   await cacheSet(cacheKey, bundle, SCALP_CANDLE_BUNDLE_TTL_SEC);
+  scalpCandleHub.publish(bundle);
   return bundle;
 }
 
