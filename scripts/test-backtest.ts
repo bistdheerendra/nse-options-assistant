@@ -203,6 +203,36 @@ function testPartitionNoLeak() {
       legacyWinRatePct: 50,
       currentWinRatePct: 100,
     },
+    sampleStatus: {
+      synthesisVersion: SYNTHESIS_VERSION.FOUR_LANE,
+      reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+      combined: {
+        mode: "ALL" as const,
+        resolvedCount: 1,
+        reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+        isReportable: false,
+        regimesTotal: 3 as const,
+      },
+      byMode: {
+        SCALP: {
+          mode: "SCALP" as const,
+          resolvedCount: 0,
+          reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+          isReportable: false,
+          regimesTotal: 3 as const,
+        },
+        SWING: {
+          mode: "SWING" as const,
+          resolvedCount: 1,
+          reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+          isReportable: false,
+          regimesTotal: 3 as const,
+        },
+      },
+      regimeTagged: false,
+      informationalOnly: true as const,
+      note: "…",
+    },
   };
 
   const edge = edgeFromTrackRecord(

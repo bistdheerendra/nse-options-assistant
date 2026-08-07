@@ -6,6 +6,7 @@ import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
 import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
+import { SampleStatusBadge } from "@/components/SampleStatusCard";
 import { ScalpSignalCard } from "@/components/ScalpSignalCard";
 import type { SmcSignal } from "@/lib/marketdata/smc";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
@@ -670,6 +671,7 @@ export function AnalysisPanel() {
                       ? ` (legacy n=${data.experimentalEdge.legacySampleSize} excluded)`
                       : ""}
                 </span>
+                <SampleStatusBadge />
                 <span
                   className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs ${
                     data.regime.regime === "CHOPPY" ||

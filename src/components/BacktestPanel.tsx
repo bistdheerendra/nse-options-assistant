@@ -1,6 +1,8 @@
 "use client";
 
 import { ChartAiLoader } from "@/components/ChartAiLoader";
+import { SampleStatusCard } from "@/components/SampleStatusCard";
+import type { SampleStatus } from "@/lib/backtest/sampleStatusTypes";
 import { useEffect, useState } from "react";
 
 type Cohort = {
@@ -36,6 +38,7 @@ type TrackPayload = {
     legacyWinRatePct: number | null;
     currentWinRatePct: number | null;
   };
+  sampleStatus: SampleStatus;
 };
 
 export function BacktestPanel() {
@@ -121,6 +124,8 @@ export function BacktestPanel() {
             : " (insufficient sample for reportable edge)"}
         </p>
       </section>
+
+      {data.sampleStatus && <SampleStatusCard data={data.sampleStatus} />}
 
       <VersionSection
         title="Current system (4-lane synthesis)"

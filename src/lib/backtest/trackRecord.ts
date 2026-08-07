@@ -10,6 +10,13 @@ import {
   inferSynthesisVersion,
   type SynthesisVersion,
 } from "./synthesisVersion";
+import type {
+  MarketRegimeKey,
+  ModeSampleStatus,
+  SampleStatus,
+} from "./sampleStatusTypes";
+
+export type { MarketRegimeKey, ModeSampleStatus, SampleStatus } from "./sampleStatusTypes";
 
 export type CohortMetrics = {
   branch: string;
@@ -45,6 +52,8 @@ type Outcome = {
   decidedAt: string;
   resolvedAt: string;
   synthesisVersion: SynthesisVersion;
+  /** Optional link to TradeIdea for regime enrichment (may be null). */
+  tradeIdeaId?: string | null;
 };
 
 const FILE = path.join(process.cwd(), ".data", "backtest-outcomes.json");
@@ -83,6 +92,7 @@ function mapDbRow(r: {
   decidedAt: Date;
   resolvedAt: Date;
   synthesisVersion: string | null;
+  tradeIdeaId?: string | null;
 }): Outcome {
   const laneScores = (r.laneScores ?? {}) as Record<string, number>;
   return {
@@ -100,7 +110,143 @@ function mapDbRow(r: {
       laneScores,
       decidedAt: r.decidedAt,
     }),
+    tradeIdeaId: r.tradeIdeaId ?? null,
   };
+}
+
+function emptyRegimeCounts(): Record<MarketRegimeKey, number> & {
+  unknown: number;
+} {
+  return { TRENDING: 0, CHOPPY: 0, VOLATILE: 0, unknown: 0 };
+}
+
+/** Pull regime labels from linked TradeIdea.featureSnapshot when present. */
+async function regimesForOutcomes(
+  rows: Outcome[],
+): Promise<Map<string, MarketRegimeKey>> {
+  const map = new Map<string, MarketRegimeKey>();
+  if (!hasDatabase() || !prisma) return map;
+
+  const ideaIds = [
+    ...new Set(
+      rows
+        .map((r) => r.tradeIdeaId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  ];
+  if (ideaIds.length === 0) return map;
+
+  try {
+    const ideas = await prisma.tradeIdea.findMany({
+      where: { id: { in: ideaIds } },
+      select: { id: true, featureSnapshot: true },
+    });
+    for (const idea of ideas) {
+      const snap =
+        idea.featureSnapshot != null &&
+        typeof idea.featureSnapshot === "object" &&
+        !Array.isArray(idea.featureSnapshot)
+          ? (idea.featureSnapshot as Record<string, unknown>)
+          : null;
+      const regimeObj =
+        snap?.regime != null &&
+        typeof snap.regime === "object" &&
+        !Array.isArray(snap.regime)
+          ? (snap.regime as Record<string, unknown>)
+          : null;
+      const label = regimeObj?.regime;
+      if (
+        label === "TRENDING" ||
+        label === "CHOPPY" ||
+        label === "VOLATILE"
+      ) {
+        map.set(idea.id, label);
+      }
+    }
+  } catch {
+    // Schema / DB lag — regime enrichment is optional
+  }
+  return map;
+}
+
+function modeSampleStatus(
+  rows: Outcome[],
+  mode: "SCALP" | "SWING" | "ALL",
+  regimeByIdeaId: Map<string, MarketRegimeKey>,
+  includeRegime: boolean,
+): ModeSampleStatus {
+  const resolvedCount = rows.length;
+  const base: ModeSampleStatus = {
+    mode,
+    resolvedCount,
+    reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+    isReportable: resolvedCount >= MIN_SAMPLE_FOR_EDGE_REPORT,
+    regimesTotal: 3,
+  };
+
+  if (!includeRegime) return base;
+
+  const byRegime = emptyRegimeCounts();
+  for (const row of rows) {
+    const key =
+      row.tradeIdeaId != null
+        ? regimeByIdeaId.get(row.tradeIdeaId)
+        : undefined;
+    if (key) byRegime[key] += 1;
+    else byRegime.unknown += 1;
+  }
+  const regimesCovered = (
+    ["TRENDING", "CHOPPY", "VOLATILE"] as MarketRegimeKey[]
+  ).filter((r) => byRegime[r] > 0).length;
+
+  return { ...base, byRegime, regimesCovered };
+}
+
+function buildSampleStatus(
+  fourLane: Outcome[],
+  regimeByIdeaId: Map<string, MarketRegimeKey>,
+  regimeTagged: boolean,
+): SampleStatus {
+  return {
+    synthesisVersion: SYNTHESIS_VERSION.FOUR_LANE,
+    reportableThreshold: MIN_SAMPLE_FOR_EDGE_REPORT,
+    combined: modeSampleStatus(fourLane, "ALL", regimeByIdeaId, regimeTagged),
+    byMode: {
+      SCALP: modeSampleStatus(
+        fourLane.filter((r) => r.mode === "SCALP"),
+        "SCALP",
+        regimeByIdeaId,
+        regimeTagged,
+      ),
+      SWING: modeSampleStatus(
+        fourLane.filter((r) => r.mode === "SWING"),
+        "SWING",
+        regimeByIdeaId,
+        regimeTagged,
+      ),
+    },
+    regimeTagged,
+    informationalOnly: true,
+    note:
+      "Informational §6 sample-size readiness only. Counts BacktestOutcome rows " +
+      `tagged ${SYNTHESIS_VERSION.FOUR_LANE} (resolved by definition). ` +
+      "Does not change the existing insufficient-sample gate.",
+  };
+}
+
+/**
+ * §6 readiness counter — post-4-lane resolved BacktestOutcome counts.
+ * Read-only / informational; does not change insufficient-sample gating.
+ * BacktestOutcome rows are resolved by definition (won + realizedPnl set).
+ */
+export async function computeSampleStatus(): Promise<SampleStatus> {
+  await tagTradeIdeaSynthesisVersions();
+  const rows = await ensureSeed();
+  const fourLane = rows.filter(
+    (r) => r.synthesisVersion === SYNTHESIS_VERSION.FOUR_LANE,
+  );
+  const regimeByIdeaId = await regimesForOutcomes(fourLane);
+  return buildSampleStatus(fourLane, regimeByIdeaId, regimeByIdeaId.size > 0);
 }
 
 /** Persist inferred synthesisVersion onto untagged DB / file rows (additive, idempotent). */
@@ -418,6 +564,8 @@ export async function computeTrackRecord(): Promise<{
     legacyWinRatePct: number | null;
     currentWinRatePct: number | null;
   };
+  /** §6 readiness — same counts as insufficient-sample gate; informational only */
+  sampleStatus: SampleStatus;
 }> {
   // Best-effort tag of TradeIdeas (idempotent); does not affect settlement cron
   await tagTradeIdeaSynthesisVersions();
@@ -428,6 +576,16 @@ export async function computeTrackRecord(): Promise<{
 
   // Headline metrics = current cohort only (never mix with legacy)
   const headline = current;
+
+  const fourLane = rows.filter(
+    (r) => r.synthesisVersion === SYNTHESIS_VERSION.FOUR_LANE,
+  );
+  const regimeByIdeaId = await regimesForOutcomes(fourLane);
+  const sampleStatus = buildSampleStatus(
+    fourLane,
+    regimeByIdeaId,
+    regimeByIdeaId.size > 0,
+  );
 
   return {
     currentVersion: CURRENT_SYNTHESIS_VERSION,
@@ -453,6 +611,7 @@ export async function computeTrackRecord(): Promise<{
         ? Math.round(current.overall.winRate * 100)
         : null,
     },
+    sampleStatus,
   };
 }
 
