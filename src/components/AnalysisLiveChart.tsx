@@ -2,6 +2,7 @@
 
 import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { LiveBadge } from "@/components/LiveBadge";
+import { toIstChartTime } from "@/lib/chartTime";
 import {
   SCALP_CHART_TFS,
   type ScalpChartTf,
@@ -17,7 +18,6 @@ import {
   type IPriceLine,
   type ISeriesApi,
   type LogicalRange,
-  type UTCTimestamp,
 } from "lightweight-charts";
 import { AlertTriangle, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -241,7 +241,8 @@ function applyChartView(
 
 function toBar(c: CandleBar): CandlestickData {
   return {
-    time: c.time as UTCTimestamp,
+    // API sends true UTC unix; chart lib labels UTC → shift for IST display
+    time: toIstChartTime(c.time),
     open: c.open,
     high: c.high,
     low: c.low,
