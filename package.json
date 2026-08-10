@@ -23,7 +23,9 @@
     "test:smc-zones": "tsx scripts/test-smc-zones.ts",
     "test:smc-signal": "tsx scripts/test-smc-signal.ts",
     "test:price-slope": "tsx scripts/test-price-slope-gate.ts",
+    "test:paper-outcome": "tsx scripts/test-paper-outcome-bridge.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",
+    "backfill:paper-outcomes": "tsx scripts/backfill-paper-outcomes.ts",
     "poll:scalp-candles": "tsx scripts/poll-scalp-candles.ts",
     "db:push": "prisma db push"
   },

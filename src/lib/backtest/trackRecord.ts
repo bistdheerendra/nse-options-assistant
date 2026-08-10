@@ -419,8 +419,10 @@ export async function recordOutcome(
   input: Omit<Outcome, "id" | "resolvedAt" | "synthesisVersion"> & {
     id?: string;
     synthesisVersion?: SynthesisVersion;
+    tradeIdeaId?: string | null;
+    resolvedAt?: string;
   },
-) {
+): Promise<string> {
   const synthesisVersion =
     input.synthesisVersion ??
     inferSynthesisVersion({
@@ -437,13 +439,22 @@ export async function recordOutcome(
     realizedPnl: input.realizedPnl,
     won: input.won,
     decidedAt: input.decidedAt,
-    resolvedAt: new Date().toISOString(),
+    resolvedAt: input.resolvedAt ?? new Date().toISOString(),
     synthesisVersion,
+    tradeIdeaId: input.tradeIdeaId ?? null,
   };
 
   if (hasDatabase() && prisma) {
-    await prisma.backtestOutcome.create({
+    // Idempotent when caller passes a stable id (e.g. paper_${positionId})
+    const existing = await prisma.backtestOutcome.findUnique({
+      where: { id: row.id },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+
+    const created = await prisma.backtestOutcome.create({
       data: {
+        id: row.id,
         underlying: row.underlying,
         mode: row.mode as "SCALP" | "SWING",
         structureBranch: row.structureBranch,
@@ -451,15 +462,19 @@ export async function recordOutcome(
         realizedPnl: row.realizedPnl,
         won: row.won,
         decidedAt: new Date(row.decidedAt),
+        resolvedAt: new Date(row.resolvedAt),
         synthesisVersion: row.synthesisVersion,
+        tradeIdeaId: row.tradeIdeaId ?? undefined,
       },
     });
-    return;
+    return created.id;
   }
   const rows = await loadFileOutcomes();
+  if (rows.some((r) => r.id === row.id)) return row.id;
   rows.push(row);
   rows.sort((a, b) => a.decidedAt.localeCompare(b.decidedAt));
   await saveFileOutcomes(rows);
+  return row.id;
 }
 
 function metricsFor(

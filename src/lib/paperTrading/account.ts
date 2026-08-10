@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { hasDatabase, prisma } from "@/lib/prisma";
+import { recordOutcomeFromClosedPosition } from "@/lib/backtest/paperOutcomeBridge";
 import {
   defaultPremiumTpSl,
   premiumExitHit,
@@ -138,6 +139,57 @@ function mergeSnapshot(
       ? (base as Record<string, unknown>)
       : {};
   return { ...prev, ...extra } as Prisma.InputJsonValue;
+}
+
+/** Merge keys into OptionsPosition.entrySnapshot (DB or file). */
+export async function patchPositionEntrySnapshot(
+  positionId: string,
+  extra: Record<string, unknown>,
+): Promise<void> {
+  if (hasDatabase() && prisma) {
+    const current = await prisma.optionsPosition.findUnique({
+      where: { id: positionId },
+      select: { entrySnapshot: true },
+    });
+    if (!current) return;
+    await prisma.optionsPosition.update({
+      where: { id: positionId },
+      data: {
+        entrySnapshot: mergeSnapshot(current.entrySnapshot, extra),
+      },
+    });
+    memoryCache = null;
+    return;
+  }
+  const store = await readFileStore();
+  const p = store.account.positions.find((x) => x.id === positionId);
+  if (!p) return;
+  p.entrySnapshot = mergeSnapshot(p.entrySnapshot, extra);
+  store.account.updatedAt = new Date().toISOString();
+  await writeFileStore(store);
+}
+
+async function maybeRecordTrackOutcome(pos: PaperPosition): Promise<void> {
+  try {
+    const result = await recordOutcomeFromClosedPosition(
+      pos,
+      patchPositionEntrySnapshot,
+    );
+    if (result.recorded) {
+      console.info(
+        `[paper→track] recorded outcome ${result.outcomeId} for position ${pos.id} (idea ${result.tradeIdeaId})`,
+      );
+    } else if (result.reason === "error") {
+      console.warn(
+        `[paper→track] skip position ${pos.id}: ${result.detail ?? result.reason}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[paper→track] failed for position ${pos.id}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 function mapDbAccount(acc: {
@@ -435,7 +487,10 @@ export async function closePaperTrade(params: {
         data: { cashBalance: account.cashBalance + closeCash },
       });
     });
-    return getOrCreateAccount();
+    const updated = await getOrCreateAccount();
+    const closed = updated.positions.find((p) => p.id === params.positionId);
+    if (closed) await maybeRecordTrackOutcome(closed);
+    return updated;
   }
 
   const store = await readFileStore();
@@ -449,6 +504,7 @@ export async function closePaperTrade(params: {
   store.account.cashBalance += closeCash;
   store.account.updatedAt = new Date().toISOString();
   await writeFileStore(store);
+  await maybeRecordTrackOutcome(p);
   return store.account;
 }
 
@@ -558,9 +614,54 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
       await writeFileStore(store);
     }
     ids.push(pos.id);
+    await maybeRecordTrackOutcome({
+      ...pos,
+      status: "EXPIRED",
+      exitPremium,
+      realizedPnl,
+      closeReason: "EXPIRED",
+      closedAt: new Date().toISOString(),
+      entrySnapshot: mergeSnapshot(pos.entrySnapshot, {
+        closeReason: "EXPIRED",
+      }),
+    });
   }
 
   return { settled: ids.length, ids };
+}
+
+/**
+ * One-shot: write BacktestOutcome for already CLOSED/EXPIRED paper rows that
+ * have tradeIdeaId but no trackRecordOutcomeId yet.
+ */
+export async function backfillPaperTrackOutcomes(): Promise<{
+  scanned: number;
+  recorded: number;
+  skipped: Record<string, number>;
+  outcomeIds: string[];
+}> {
+  const account = await getOrCreateAccount();
+  const skipped: Record<string, number> = {};
+  const outcomeIds: string[] = [];
+  let recorded = 0;
+  let scanned = 0;
+
+  for (const pos of account.positions) {
+    if (pos.status !== "CLOSED" && pos.status !== "EXPIRED") continue;
+    scanned += 1;
+    const result = await recordOutcomeFromClosedPosition(
+      pos,
+      patchPositionEntrySnapshot,
+    );
+    if (result.recorded) {
+      recorded += 1;
+      outcomeIds.push(result.outcomeId);
+    } else {
+      skipped[result.reason] = (skipped[result.reason] ?? 0) + 1;
+    }
+  }
+
+  return { scanned, recorded, skipped, outcomeIds };
 }
 
 export function portfolioSummary(

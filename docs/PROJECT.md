@@ -481,7 +481,7 @@ Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshot
 - Per-lane lean buckets cover Technical, Options Flow, Macro, and Sentiment going forward (legacy seeds often lack Macro/Sentiment scores).
 - UI "edge" badges labeled **experimental / unvalidated** until meaningful multi-regime sample size.
 - This is the evidence gate before any future real-money automation discussion (still out of scope).
-- Expiry settlement cron (`settle:expiry` / `/api/cron/settle-expiry`) is unchanged — idempotent paper settlement only; it does not write track-record cohorts.
+- Expiry settlement cron (`settle:expiry` / `/api/cron/settle-expiry`) and paper TP/SL/manual close now call the paper→track bridge when `entrySnapshot.tradeIdeaId` is present (Mark as taken / scalp auto-paper). Manual chain buys without a trade idea stay out of the edge cohort. Idempotent via stable outcome id `paper_${positionId}` + `entrySnapshot.trackRecordOutcomeId`. Backfill: `POST /api/backtest/backfill-paper` or `npm run backfill:paper-outcomes`.
 
 ## 7. UI / responsive shell
 
@@ -545,6 +545,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
 - Stage 6.1: Backtest re-validation after 4-lane synthesis — `synthesisVersion` cohort split (legacy 2-lane-effective vs post-4-lane); edge badges use post-4-lane only with insufficient-sample gating; per-lane lean includes Macro + Sentiment
 - Stage 6 sample-status indicator: `GET /api/backtest/sample-status` (+ `sampleStatus` on `/api/backtest`) — resolved post-4-lane count vs threshold 10, SCALP/SWING breakdown, optional regime coverage; Track Record card + Analysis compact badge; **informational only** (gate logic unchanged)
+- Stage 6.2: Paper → track-record bridge — TP/SL/manual/expiry closes with `tradeIdeaId` write `BacktestOutcome` (`paper_${positionId}`); `POST /api/backtest/backfill-paper` / `npm run backfill:paper-outcomes`; `npm run test:paper-outcome`
 - Dashboard (default `/`): Binance-style paper portfolio P&L header (`PortfolioPnlCard` — est. total value, today’s PnL, gold equity sparkline, hide-balance toggle, client retry) above index quote cards for Nifty 50, Bank Nifty, Sensex, Gift Nifty + mini candles (`/api/dashboard`). **Live path:** backend `liveQuoteHub` + Angel SmartAPI WebSocket 2.0 (`websocketFeed.ts`) for Nifty / Bank Nifty / Sensex ticks (push on each tick via SSE `/api/dashboard/stream`); Gift Nifty still ~0.5s public feed (not on SmartAPI); full candle snapshot ~30s. Public NSE spots remain fallback if WS down. Browser `EventSource`. With `MARKETDATA_DEMO_MODE=true` / missing Angel keys, LTP is public-feed only. Pulsing **LIVE** badge + price flash when LTP changes. Index cards show IST session hours with open/closed styling (§7.1).
 - Responsive app shell: mobile bottom tab nav + safe-area; desktop top nav + footer (see §7).
 - Market session hours (`marketHours.ts`): IST open/closed for dashboard + macro quote ids; gold ● when open; ~30s UI tick; heuristic regular sessions only (no holiday calendar) — see §7.1.
