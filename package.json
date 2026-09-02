@@ -24,6 +24,7 @@
     "test:smc-signal": "tsx scripts/test-smc-signal.ts",
     "test:price-slope": "tsx scripts/test-price-slope-gate.ts",
     "test:paper-outcome": "tsx scripts/test-paper-outcome-bridge.ts",
+    "test:position-marks": "tsx scripts/test-position-marks.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",
     "backfill:paper-outcomes": "tsx scripts/backfill-paper-outcomes.ts",
     "poll:scalp-candles": "tsx scripts/poll-scalp-candles.ts",

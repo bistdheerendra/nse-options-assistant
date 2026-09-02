@@ -124,7 +124,7 @@ Max days / request: 30 / 60 / 100 / 200 respectively. We request shorter windows
 
 **Data flow**
 1. `getMultiTimeframeCandles(underlying)` fetches the four intervals **sequentially** (Angel `angelThrottle` ~250ms + `SCALP_POLL_GAP_MS` 350ms between TFs).
-2. Best-effort idempotent upsert into Postgres `MarketCandle` (`@@unique([underlying, interval, time])`) when `DATABASE_URL` is set.
+2. Best-effort idempotent upsert into Postgres `MarketCandle` (`@@unique([underlying, interval, time])`) when `DATABASE_URL` is set. **Egress-aware:** historical bars use `createMany` + `skipDuplicates` (count-only response); tip bars (last 5) use `upsert` with `select: { id }` only. `poll:scalp-candles` fetches with `persist:false` then writes once (no double upsert).
 3. In-process TTL (~45s) + optional Upstash Redis key `scalp:mtf:{underlying}` coalesce request-time callers.
 4. Job: `npm run poll:scalp-candles` walks all three underlyings with an extra ~800ms gap — force-refresh, no silent parallel hammering.
 5. API: `GET /api/scalp/candles?underlying=NIFTY` (optional `&interval=ONE_MINUTE`).
@@ -462,6 +462,17 @@ Expiry settlement (idempotent): intrinsic `max(0, spot-strike)` CE / `max(0, str
 - Without `DATABASE_URL`: file-backed store only.
 - `/api/paper` GET returns 503 only if DB and mirrors are all unavailable; client retries with backoff + Retry control.
 
+### Execution speed (open / exit)
+
+Open (`POST /api/paper`) and Exit (`POST /api/paper/close`) are **not** full-account reloads.
+
+- **Response shape:** `{ position, cashBalance, accountId, executedAt, note }` — the newly created or closed row plus updated cash. Historical positions stay on `GET /api/paper` (page load / portfolio card), which is not on the confirm path.
+- **Writes:** two sequential Prisma statements (cash `increment` + position create/update) — **not** an interactive `$transaction`. BEGIN/COMMIT on Supabase transaction-mode PgBouncer (Seoul) was ~500ms extra. Cash is updated first; if the position write fails, cash is reverted once. Concurrent paper fills are rare; full serializability is overkill for this ledger.
+- **Track record:** `maybeRecordTrackOutcome` is fire-and-forget after close (does not block confirmation).
+- **Fill price:** Paper page Buy uses the live option-chain SSE LTP already on screen (`liveOptionChainHub` / `/api/paper/chain/stream`), timestamped at click. **Mark as taken** uses the same SSE LTP at confirm time (not the ~1 min synthesis REST `suggestedContract.entryPremium`). UI shows premium + capture time. If the live stream is down, Mark as taken falls back to the synthesis snapshot and labels it.
+- **Optimistic UI:** the position appears opened/closed immediately at that LTP; the server row reconciles when the POST returns. If the server premium differs by ≥ ₹0.05, the UI shows **fill corrected** rather than silently overwriting.
+- **Traces:** `PAPER_TIMING=true` (server) and `NEXT_PUBLIC_PAPER_TIMING=true` (browser) log `[paper-timing]` steps. Off by default.
+
 ## 5. Lanes architecture
 
 Each lane returns `{ score: -1..1, signals: string[], rawIndicators }`. Snapshots persist with every trade idea (additive schema).
@@ -518,7 +529,8 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Folder structure (`marketdata/`, `lanes/`, `synthesis/`, `paperTrading/`, `backtest/`)
 - docs/PROJECT.md + README + `.env.example`
 - Stage 1: Angel One auth, LTP, candles, option chain, throttle/retry, `/api/marketdata/test`
-- Scalp Stage 1: Multi-TF candle pipeline (`src/lib/marketdata/scalp/`) — Angel 1m/3m/5m/15m sequential fetch, Postgres `MarketCandle` upsert, Redis/TTL cache, `GET /api/scalp/candles`, `npm run poll:scalp-candles`; DB-cache / demo degrade path documented in §3.1
+- Scalp Stage 1: Multi-TF candle pipeline (`src/lib/marketdata/scalp/`) — Angel 1m/3m/5m/15m sequential fetch, Postgres `MarketCandle` upsert (createMany + tip upsert, low egress), Redis/TTL cache, `GET /api/scalp/candles`, `npm run poll:scalp-candles`; DB-cache / demo degrade path documented in §3.1
+- Supabase egress hardening: MarketCandle no full RETURNING *; poll single-write; Analysis soft MTF refresh uses `persist=false` (keeps last tradeIdeaId); BacktestOutcome `select` + `take:5000`; TradeIdea tagging batched; paper account 3s memory TTL
 - Scalp candle SSE push: in-process `scalpCandleHub` + `GET /api/scalp/candles/stream` (content-hash idempotent; last-known seed incl. demo/`db_cache`); Analysis `useScalpCandlesLiveStream` with REST poll fallback on stream error; Redis soft-watch bridges external `poll:scalp-candles` without extra Angel calls (single-instance only)
 - Scalp Stage 2: Per-TF price action (`priceAction.ts`) — engulfing/doji/hammer/shooting-star/inside-bar + HH/HL structure + candle strength; `?priceAction=1` on scalp candles API; `npm run test:scalp-pa`
 - Scalp Stage 3: Volume confirm/disqualify (`volume.ts`) — lookback=20, spike≥1.5×avg, weak<0.6×avg; adjusts PA confidence (±0.15 / −0.25); `?volume=1`; `npm run test:scalp-volume`
@@ -542,6 +554,8 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Chart tab (`/chart`, header + mobile nav): `ChartsPanel` shows **NIFTY + BANKNIFTY + SENSEX** live candlesticks together (3-up on xl, stacked on smaller). Shared Scalp/Swing mode; same `/api/analysis/candles` + dashboard SSE LTP path as Analysis.
 - Stage 4: Scalp/Swing mode threaded through lanes + synthesizer + UI
 - Stage 5: Paper trading models, P&L, expiry settlement cron, paper UI; paper account load hardened (DB retry + memory/file mirror); open positions show duration + premium TP/SL; auto-close on TP/SL hit → Closed table with status reason
+- Paper live P&L for **all** open rows: selected-chain SSE LTP plus `GET /api/paper/marks` (TTL ~2s) which re-fetches each open row’s underlying+expiry chain (NSE OC for NIFTY/BANKNIFTY, Angel for SENSEX; no Greeks) so NIFTY + BANKNIFTY (or other-expiry) marks/P&L show together — no “switch underlying” gap; Unrealized header + `/api/paper` summary use the same marks map
+- Paper open/exit execution: confirm path returns `{ position, cashBalance }` (no full-history `findFirst`); sequential Prisma writes vs interactive `$transaction`; optimistic UI; Mark as taken fills at live chain SSE LTP + timestamp (synthesis REST fallback labeled)
 - Stage 6: Time-ordered backtest cohorts + experimental track-record UI
 - Stage 6.1: Backtest re-validation after 4-lane synthesis — `synthesisVersion` cohort split (legacy 2-lane-effective vs post-4-lane); edge badges use post-4-lane only with insufficient-sample gating; per-lane lean includes Macro + Sentiment
 - Stage 6 sample-status indicator: `GET /api/backtest/sample-status` (+ `sampleStatus` on `/api/backtest`) — resolved post-4-lane count vs threshold 10, SCALP/SWING breakdown, optional regime coverage; Track Record card + Analysis compact badge; **informational only** (gate logic unchanged)
@@ -577,7 +591,7 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 | Google News RSS + Yahoo Finance RSS | Dashboard “Today's News” + Sentiment lane headline bias aggregate | Free public RSS | Soft limits / regional variance; shared `getCachedMarketNews` TTL ~5m | Empty list + UI note; Sentiment omits news component and scores from FII/DII only |
 | NSE India `fiidiiTradeReact` | Sentiment lane daily FII/DII cash net (₹ Cr) | Free public | Cookie/UA soft limits; provisional figures; shared TTL ~15m | Mr Chartist mirror; Sentiment omits FII/DII component if both fail |
 | Mr Chartist FII/DII API (`fii-diidata.mrchartist.com/api/data`) | Sentiment lane FII/DII fallback (NSE-sourced mirror) | Free unofficial | Soft / polite limits; evening provisional | Sentiment news-only partial score if this and NSE both fail |
-| NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY | Free public | Cookie session + soft rate limits; SENSEX not on this API | Angel One quote FULL; then labeled demo mocks |
+| NSE India `option-chain-v3` + `option-chain-contract-info` | Live option chain LTP / OI / IV / % change for NIFTY & BANKNIFTY; **paper open-position marks** (`GET /api/paper/marks`) fetch each open row’s expiry (not only the selected index) | Free public | Cookie session + soft rate limits; SENSEX not on this API; paper marks TTL ~2s | Angel One quote FULL (numeric tokens / SENSEX); then last-good marks / `—` |
 | Postgres (Supabase) via Prisma | Paper account, positions, trade ideas, backtest outcomes, **scalp `MarketCandle` OHLCV** (1m/3m/5m/15m) | Per Supabase plan | Pooler cold starts / network blips | In-memory + `.data/paper-account.json` mirror after successful read; file-only store if no `DATABASE_URL`; scalp fetch still works without DB (no persist / no DB-cache fallback) |
 | Upstash Redis | Optional cache for MTF bundles (`scalp:mtf:{underlying}`) + other TTLs; REST client only (no pub/sub) | Free tier limits apply | Per-plan | When env missing, `cacheGet`/`cacheSet` fall back to `.data/shared-cache.json` so local `poll:scalp-candles` → soft-watch still bridges; scalp SSE uses in-process hub + soft-watch (not Redis pub/sub) |
 

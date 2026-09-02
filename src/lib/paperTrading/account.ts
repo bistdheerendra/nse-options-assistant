@@ -13,6 +13,8 @@ import {
   type SpotLevelsForPremiumSlTp,
   type TradeAction,
 } from "./pnl";
+import { markPremiumFromMap } from "./positionMarkLookup";
+import { paperTiming } from "./timing";
 import type { Prisma } from "@prisma/client";
 
 export type PaperPosition = {
@@ -50,6 +52,13 @@ export type PaperAccount = {
   positions: PaperPosition[];
 };
 
+/** Hot-path open/close result — never includes full position history. */
+export type PaperMutationResult = {
+  position: PaperPosition;
+  cashBalance: number;
+  accountId: string;
+};
+
 type StoreFile = { account: PaperAccount };
 
 const DATA_DIR = path.join(process.cwd(), ".data");
@@ -57,6 +66,23 @@ const STORE_PATH = path.join(DATA_DIR, "paper-account.json");
 
 /** Last successful DB read — survives brief pooler blips within the same process. */
 let memoryCache: PaperAccount | null = null;
+/** Short TTL so dashboard + paper + TP/SL paths don't re-pull full positions every call. */
+let memoryCacheAt = 0;
+const PAPER_MEMORY_TTL_MS = 3_000;
+
+function invalidatePaperMemoryCache(): void {
+  memoryCache = null;
+  memoryCacheAt = 0;
+}
+
+/** Account id never changes for the default paper book — skip a round-trip after first resolve. */
+let stickyAccountId: string | null = null;
+
+function setPaperMemoryCache(account: PaperAccount): void {
+  memoryCache = account;
+  memoryCacheAt = Date.now();
+  stickyAccountId = account.id;
+}
 
 function startingCash(): number {
   return Number(process.env.PAPER_STARTING_CASH ?? 100_000);
@@ -146,19 +172,24 @@ export async function patchPositionEntrySnapshot(
   positionId: string,
   extra: Record<string, unknown>,
 ): Promise<void> {
+  const t0 = Date.now();
   if (hasDatabase() && prisma) {
     const current = await prisma.optionsPosition.findUnique({
       where: { id: positionId },
       select: { entrySnapshot: true },
     });
+    paperTiming("patchPositionEntrySnapshot.findUnique", t0);
     if (!current) return;
+    const tUpd = Date.now();
     await prisma.optionsPosition.update({
       where: { id: positionId },
       data: {
         entrySnapshot: mergeSnapshot(current.entrySnapshot, extra),
       },
+      select: { id: true },
     });
-    memoryCache = null;
+    paperTiming("patchPositionEntrySnapshot.update", tUpd);
+    invalidatePaperMemoryCache();
     return;
   }
   const store = await readFileStore();
@@ -192,6 +223,45 @@ async function maybeRecordTrackOutcome(pos: PaperPosition): Promise<void> {
   }
 }
 
+function isoDay(v: Date | string): string {
+  const d = v instanceof Date ? v : new Date(v);
+  return d.toISOString().slice(0, 10);
+}
+
+function isoTs(v: Date | string | null | undefined): string | null {
+  if (v == null) return null;
+  const d = v instanceof Date ? v : new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function mapDbPosition(p: DbPositionRow): PaperPosition {
+  const meta = snapshotMeta(p.entrySnapshot);
+  return {
+    id: p.id,
+    accountId: p.accountId,
+    underlying: p.underlying,
+    strike: p.strike,
+    optionType: p.optionType,
+    expiry: isoDay(p.expiry),
+    action: p.action,
+    lotSize: p.lotSize,
+    lots: p.lots,
+    entryPremium: p.entryPremium,
+    stopLoss: p.stopLoss ?? meta.stopLoss ?? null,
+    takeProfit: p.takeProfit ?? meta.takeProfit ?? null,
+    status: p.status,
+    exitPremium: p.exitPremium,
+    realizedPnl: p.realizedPnl,
+    closeReason: p.closeReason ?? meta.closeReason ?? null,
+    mode: p.mode,
+    symbolToken: p.symbolToken,
+    tradingSymbol: p.tradingSymbol,
+    openedAt: isoTs(p.openedAt) ?? new Date().toISOString(),
+    closedAt: isoTs(p.closedAt),
+    entrySnapshot: p.entrySnapshot,
+  };
+}
+
 function mapDbAccount(acc: {
   id: string;
   name: string;
@@ -208,33 +278,7 @@ function mapDbAccount(acc: {
     startingCash: acc.startingCash,
     createdAt: acc.createdAt.toISOString(),
     updatedAt: acc.updatedAt.toISOString(),
-    positions: acc.positions.map((p) => {
-      const meta = snapshotMeta(p.entrySnapshot);
-      return {
-        id: p.id,
-        accountId: p.accountId,
-        underlying: p.underlying,
-        strike: p.strike,
-        optionType: p.optionType,
-        expiry: p.expiry.toISOString().slice(0, 10),
-        action: p.action,
-        lotSize: p.lotSize,
-        lots: p.lots,
-        entryPremium: p.entryPremium,
-        stopLoss: p.stopLoss ?? meta.stopLoss ?? null,
-        takeProfit: p.takeProfit ?? meta.takeProfit ?? null,
-        status: p.status,
-        exitPremium: p.exitPremium,
-        realizedPnl: p.realizedPnl,
-        closeReason: p.closeReason ?? meta.closeReason ?? null,
-        mode: p.mode,
-        symbolToken: p.symbolToken,
-        tradingSymbol: p.tradingSymbol,
-        openedAt: p.openedAt.toISOString(),
-        closedAt: p.closedAt?.toISOString() ?? null,
-        entrySnapshot: p.entrySnapshot,
-      };
-    }),
+    positions: acc.positions.map(mapDbPosition),
   };
 }
 
@@ -255,14 +299,29 @@ async function mirrorToFile(account: PaperAccount): Promise<void> {
  * file mirror so the dashboard P&L card never hard-fails after a good read.
  */
 export async function getOrCreateAccount(): Promise<PaperAccount> {
+  const t0 = Date.now();
+  if (
+    memoryCache &&
+    Date.now() - memoryCacheAt < PAPER_MEMORY_TTL_MS
+  ) {
+    paperTiming("getOrCreateAccount.memoryCache", t0, `positions=${memoryCache.positions.length}`);
+    return memoryCache;
+  }
+
   if (hasDatabase() && prisma) {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
+        const tQuery = Date.now();
         let acc = await prisma.paperOptionsAccount.findFirst({
           include: { positions: true },
           orderBy: { createdAt: "asc" },
         });
+        paperTiming(
+          `getOrCreateAccount.findFirst.attempt${attempt + 1}`,
+          tQuery,
+          `positions=${acc?.positions.length ?? 0}`,
+        );
         if (!acc) {
           acc = await prisma.paperOptionsAccount.create({
             data: {
@@ -274,8 +333,9 @@ export async function getOrCreateAccount(): Promise<PaperAccount> {
           });
         }
         const mapped = mapDbAccount(acc as Parameters<typeof mapDbAccount>[0]);
-        memoryCache = mapped;
+        setPaperMemoryCache(mapped);
         void mirrorToFile(mapped);
+        paperTiming("getOrCreateAccount.dbTotal", t0, `positions=${mapped.positions.length}`);
         return mapped;
       } catch (err) {
         lastErr = err;
@@ -299,7 +359,7 @@ export async function getOrCreateAccount(): Promise<PaperAccount> {
         file.account.id !== "paper_default" ||
         file.account.positions.length > 0
       ) {
-        memoryCache = file.account;
+        setPaperMemoryCache(file.account);
         console.warn("[paper] serving file mirror after DB failure");
         return file.account;
       }
@@ -311,7 +371,212 @@ export async function getOrCreateAccount(): Promise<PaperAccount> {
       ? lastErr
       : new Error("Paper database unavailable");
   }
-  return (await readFileStore()).account;
+  const fileAccount = (await readFileStore()).account;
+  setPaperMemoryCache(fileAccount);
+  return fileAccount;
+}
+
+async function resolveAccountId(): Promise<string> {
+  if (stickyAccountId) return stickyAccountId;
+  if (memoryCache) {
+    stickyAccountId = memoryCache.id;
+    return stickyAccountId;
+  }
+  if (!hasDatabase() || !prisma) {
+    const file = await readFileStore();
+    stickyAccountId = file.account.id;
+    return stickyAccountId;
+  }
+  const t0 = Date.now();
+  let acc = await prisma.paperOptionsAccount.findFirst({
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!acc) {
+    acc = await prisma.paperOptionsAccount.create({
+      data: {
+        name: "Default Paper Account",
+        cashBalance: startingCash(),
+        startingCash: startingCash(),
+      },
+      select: { id: true },
+    });
+  }
+  stickyAccountId = acc.id;
+  paperTiming("resolveAccountId", t0, acc.id);
+  return acc.id;
+}
+
+function patchCacheOpen(position: PaperPosition, cashBalance: number): void {
+  stickyAccountId = position.accountId;
+  if (!memoryCache) return;
+  const positions = memoryCache.positions.some((p) => p.id === position.id)
+    ? memoryCache.positions.map((p) => (p.id === position.id ? position : p))
+    : [...memoryCache.positions, position];
+  setPaperMemoryCache({
+    ...memoryCache,
+    cashBalance,
+    updatedAt: new Date().toISOString(),
+    positions,
+  });
+  void mirrorToFile(memoryCache);
+}
+
+function patchCacheClose(position: PaperPosition, cashBalance: number): void {
+  stickyAccountId = position.accountId;
+  if (!memoryCache) return;
+  setPaperMemoryCache({
+    ...memoryCache,
+    cashBalance,
+    updatedAt: new Date().toISOString(),
+    positions: memoryCache.positions.map((p) =>
+      p.id === position.id ? position : p,
+    ),
+  });
+  void mirrorToFile(memoryCache);
+}
+
+async function resolveOpenPosition(positionId: string): Promise<PaperPosition> {
+  if (memoryCache) {
+    const cached = memoryCache.positions.find((p) => p.id === positionId);
+    if (cached && cached.status === "OPEN") return cached;
+  }
+  if (hasDatabase() && prisma) {
+    const t0 = Date.now();
+    const row = await prisma.optionsPosition.findUnique({
+      where: { id: positionId },
+    });
+    paperTiming("resolveOpenPosition.findUnique", t0);
+    if (!row || row.status !== "OPEN") {
+      throw new Error("Open position not found");
+    }
+    return mapDbPosition(row as DbPositionRow);
+  }
+  const store = await readFileStore();
+  const p = store.account.positions.find((x) => x.id === positionId);
+  if (!p || p.status !== "OPEN") throw new Error("Open position not found");
+  return p;
+}
+
+async function openPositionDb(params: {
+  accountId: string;
+  cashDelta: number;
+  underlying: string;
+  strike: number;
+  optionType: OptionSide;
+  expiry: Date;
+  action: TradeAction;
+  lotSize: number;
+  lots: number;
+  entryPremium: number;
+  stopLoss: number;
+  takeProfit: number;
+  mode: "SCALP" | "SWING";
+  symbolToken: string | null;
+  tradingSymbol: string | null;
+  entrySnapshot: Prisma.InputJsonValue;
+}): Promise<{ position: PaperPosition; cashBalance: number }> {
+  if (!prisma) throw new Error("Paper database unavailable");
+  const t0 = Date.now();
+  // Two statements, no interactive $transaction (PgBouncer BEGIN/COMMIT was ~500ms).
+  // Debit/credit first (returns new cash), then insert. If create fails, reverse cash.
+  // BUY: if cash went negative, revert and reject. Concurrent paper buys are rare.
+  const tCash = Date.now();
+  const accAfter = await prisma.paperOptionsAccount.update({
+    where: { id: params.accountId },
+    data: { cashBalance: { increment: params.cashDelta } },
+    select: { cashBalance: true },
+  });
+  paperTiming("openPositionDb.cashIncrement", tCash);
+  if (params.action === "BUY" && accAfter.cashBalance < 0) {
+    await prisma.paperOptionsAccount.update({
+      where: { id: params.accountId },
+      data: { cashBalance: { increment: -params.cashDelta } },
+      select: { id: true },
+    });
+    throw new Error("Insufficient paper cash for this debit trade");
+  }
+
+  try {
+    const tCreate = Date.now();
+    const row = await prisma.optionsPosition.create({
+      data: {
+        accountId: params.accountId,
+        underlying: params.underlying,
+        strike: params.strike,
+        optionType: params.optionType,
+        expiry: params.expiry,
+        action: params.action,
+        lotSize: params.lotSize,
+        lots: params.lots,
+        entryPremium: params.entryPremium,
+        stopLoss: params.stopLoss,
+        takeProfit: params.takeProfit,
+        mode: params.mode,
+        symbolToken: params.symbolToken,
+        tradingSymbol: params.tradingSymbol,
+        entrySnapshot: params.entrySnapshot,
+      },
+    });
+    paperTiming("openPositionDb.create", tCreate);
+    paperTiming("openPositionDb.total", t0);
+    return {
+      position: mapDbPosition(row as DbPositionRow),
+      cashBalance: accAfter.cashBalance,
+    };
+  } catch (err) {
+    try {
+      await prisma.paperOptionsAccount.update({
+        where: { id: params.accountId },
+        data: { cashBalance: { increment: -params.cashDelta } },
+        select: { id: true },
+      });
+    } catch (revertErr) {
+      console.error(
+        "[paper] cash revert after failed position create:",
+        revertErr,
+      );
+    }
+    throw err;
+  }
+}
+
+async function closePositionDb(params: {
+  positionId: string;
+  accountId: string;
+  exitPremium: number;
+  realized: number;
+  closeCash: number;
+  entrySnapshot: Prisma.InputJsonValue;
+  closeReason: string;
+}): Promise<{ position: PaperPosition; cashBalance: number }> {
+  if (!prisma) throw new Error("Paper database unavailable");
+  const t0 = Date.now();
+  const tUpd = Date.now();
+  const row = await prisma.optionsPosition.update({
+    where: { id: params.positionId },
+    data: {
+      status: "CLOSED",
+      exitPremium: params.exitPremium,
+      realizedPnl: params.realized,
+      closedAt: new Date(),
+      closeReason: params.closeReason,
+      entrySnapshot: params.entrySnapshot,
+    },
+  });
+  paperTiming("closePositionDb.positionUpdate", tUpd);
+  const tCash = Date.now();
+  const acc = await prisma.paperOptionsAccount.update({
+    where: { id: params.accountId },
+    data: { cashBalance: { increment: params.closeCash } },
+    select: { cashBalance: true },
+  });
+  paperTiming("closePositionDb.cashIncrement", tCash);
+  paperTiming("closePositionDb.total", t0);
+  return {
+    position: mapDbPosition(row as DbPositionRow),
+    cashBalance: acc.cashBalance,
+  };
 }
 
 export async function openPaperTrade(input: {
@@ -331,7 +596,7 @@ export async function openPaperTrade(input: {
   takeProfit?: number | null;
   /** Verdict-card spot levels — preferred source for premium SL/TP when present. */
   spotLevels?: SpotLevelsForPremiumSlTp | null;
-}): Promise<PaperAccount> {
+}): Promise<PaperMutationResult> {
   // Premium cash impact: BUY debits premium*mult; SELL credits it
   const notional = input.entryPremium * input.lotSize * input.lots;
   const cashDelta = input.action === "BUY" ? -notional : notional;
@@ -386,34 +651,35 @@ export async function openPaperTrade(input: {
   }
 
   if (hasDatabase() && prisma) {
-    const acc = await getOrCreateAccount();
+    const tOpen = Date.now();
+    const accountId = await resolveAccountId();
+    paperTiming("openPaperTrade.resolveAccountId", tOpen);
     const entrySnapshot = mergeSnapshot(input.entrySnapshot, slTpMeta);
-    await prisma.$transaction(async (tx) => {
-      await tx.paperOptionsAccount.update({
-        where: { id: acc.id },
-        data: { cashBalance: acc.cashBalance + cashDelta },
-      });
-      await tx.optionsPosition.create({
-        data: {
-          accountId: acc.id,
-          underlying: input.underlying,
-          strike: input.strike,
-          optionType: input.optionType,
-          expiry: new Date(input.expiry),
-          action: input.action,
-          lotSize: input.lotSize,
-          lots: input.lots,
-          entryPremium: input.entryPremium,
-          stopLoss,
-          takeProfit,
-          mode: input.mode,
-          symbolToken: input.symbolToken,
-          tradingSymbol: input.tradingSymbol,
-          entrySnapshot,
-        },
-      });
+    const written = await openPositionDb({
+      accountId,
+      cashDelta,
+      underlying: input.underlying,
+      strike: input.strike,
+      optionType: input.optionType,
+      expiry: new Date(input.expiry),
+      action: input.action,
+      lotSize: input.lotSize,
+      lots: input.lots,
+      entryPremium: input.entryPremium,
+      stopLoss,
+      takeProfit,
+      mode: input.mode,
+      symbolToken: input.symbolToken ?? null,
+      tradingSymbol: input.tradingSymbol ?? null,
+      entrySnapshot,
     });
-    return getOrCreateAccount();
+    patchCacheOpen(written.position, written.cashBalance);
+    paperTiming("openPaperTrade.total", tOpen, `id=${written.position.id}`);
+    return {
+      position: written.position,
+      cashBalance: written.cashBalance,
+      accountId,
+    };
   }
 
   const store = await readFileStore();
@@ -444,17 +710,22 @@ export async function openPaperTrade(input: {
   store.account.positions.push(pos);
   store.account.updatedAt = new Date().toISOString();
   await writeFileStore(store);
-  return store.account;
+  setPaperMemoryCache(store.account);
+  return {
+    position: pos,
+    cashBalance: store.account.cashBalance,
+    accountId: store.account.id,
+  };
 }
 
 export async function closePaperTrade(params: {
   positionId: string;
   exitPremium: number;
   closeReason?: CloseReason;
-}): Promise<PaperAccount> {
-  const account = await getOrCreateAccount();
-  const pos = account.positions.find((p) => p.id === params.positionId);
-  if (!pos || pos.status !== "OPEN") throw new Error("Open position not found");
+}): Promise<PaperMutationResult> {
+  const tClose = Date.now();
+  const pos = await resolveOpenPosition(params.positionId);
+  paperTiming("closePaperTrade.resolveOpenPosition", tClose);
 
   const realized =
     pos.action === "BUY"
@@ -471,26 +742,24 @@ export async function closePaperTrade(params: {
   const entrySnapshot = mergeSnapshot(pos.entrySnapshot, { closeReason });
 
   if (hasDatabase() && prisma) {
-    await prisma.$transaction(async (tx) => {
-      await tx.optionsPosition.update({
-        where: { id: pos.id },
-        data: {
-          status: "CLOSED",
-          exitPremium: params.exitPremium,
-          realizedPnl: realized,
-          closedAt: new Date(),
-          entrySnapshot,
-        },
-      });
-      await tx.paperOptionsAccount.update({
-        where: { id: account.id },
-        data: { cashBalance: account.cashBalance + closeCash },
-      });
+    const written = await closePositionDb({
+      positionId: pos.id,
+      accountId: pos.accountId,
+      exitPremium: params.exitPremium,
+      realized,
+      closeCash,
+      entrySnapshot,
+      closeReason,
     });
-    const updated = await getOrCreateAccount();
-    const closed = updated.positions.find((p) => p.id === params.positionId);
-    if (closed) await maybeRecordTrackOutcome(closed);
-    return updated;
+    patchCacheClose(written.position, written.cashBalance);
+    // Track-record bookkeeping must not block the user-facing close.
+    void maybeRecordTrackOutcome(written.position);
+    paperTiming("closePaperTrade.total", tClose, `id=${written.position.id}`);
+    return {
+      position: written.position,
+      cashBalance: written.cashBalance,
+      accountId: written.position.accountId,
+    };
   }
 
   const store = await readFileStore();
@@ -504,8 +773,14 @@ export async function closePaperTrade(params: {
   store.account.cashBalance += closeCash;
   store.account.updatedAt = new Date().toISOString();
   await writeFileStore(store);
-  await maybeRecordTrackOutcome(p);
-  return store.account;
+  setPaperMemoryCache(store.account);
+  void maybeRecordTrackOutcome(p);
+  paperTiming("closePaperTrade.total", tClose);
+  return {
+    position: p,
+    cashBalance: store.account.cashBalance,
+    accountId: store.account.id,
+  };
 }
 
 /**
@@ -514,16 +789,28 @@ export async function closePaperTrade(params: {
  */
 export async function closePositionsOnTpSl(
   marks: Record<string, number>,
-): Promise<{ closed: Array<{ id: string; reason: "TP" | "SL"; exitPremium: number }> }> {
+): Promise<{
+  closed: Array<{
+    id: string;
+    reason: "TP" | "SL";
+    exitPremium: number;
+    position: PaperPosition;
+  }>;
+  cashBalance: number | null;
+}> {
   const account = await getOrCreateAccount();
-  const closed: Array<{ id: string; reason: "TP" | "SL"; exitPremium: number }> = [];
+  const closed: Array<{
+    id: string;
+    reason: "TP" | "SL";
+    exitPremium: number;
+    position: PaperPosition;
+  }> = [];
+  let cashBalance: number | null = account.cashBalance;
 
   for (const pos of account.positions) {
     if (pos.status !== "OPEN") continue;
-    const key =
-      pos.tradingSymbol ?? `${pos.underlying}-${pos.strike}-${pos.optionType}`;
-    const mark = marks[key];
-    if (mark == null || !Number.isFinite(mark)) continue;
+    const mark = markPremiumFromMap(pos, marks);
+    if (mark == null) continue;
 
     const levels =
       pos.stopLoss != null && pos.takeProfit != null
@@ -538,15 +825,21 @@ export async function closePositionsOnTpSl(
     });
     if (!hit) continue;
 
-    await closePaperTrade({
+    const result = await closePaperTrade({
       positionId: pos.id,
       exitPremium: mark,
       closeReason: hit,
     });
-    closed.push({ id: pos.id, reason: hit, exitPremium: mark });
+    cashBalance = result.cashBalance;
+    closed.push({
+      id: pos.id,
+      reason: hit,
+      exitPremium: mark,
+      position: result.position,
+    });
   }
 
-  return { closed };
+  return { closed, cashBalance };
 }
 
 export async function settleExpiredPositions(spotByUnderlying: Record<string, number>): Promise<{
@@ -581,7 +874,10 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
 
     if (hasDatabase() && prisma) {
       await prisma.$transaction(async (tx) => {
-        const current = await tx.optionsPosition.findUnique({ where: { id: pos.id } });
+        const current = await tx.optionsPosition.findUnique({
+          where: { id: pos.id },
+          select: { id: true, status: true },
+        });
         if (!current || current.status !== "OPEN") return;
         await tx.optionsPosition.update({
           where: { id: pos.id },
@@ -594,12 +890,15 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
               closeReason: "EXPIRED",
             }),
           },
+          select: { id: true },
         });
         await tx.paperOptionsAccount.update({
           where: { id: account.id },
           data: { cashBalance: { increment: closeCash } },
+          select: { id: true },
         });
       });
+      invalidatePaperMemoryCache();
     } else {
       const store = await readFileStore();
       const p = store.account.positions.find((x) => x.id === pos.id);
@@ -614,7 +913,7 @@ export async function settleExpiredPositions(spotByUnderlying: Record<string, nu
       await writeFileStore(store);
     }
     ids.push(pos.id);
-    await maybeRecordTrackOutcome({
+    void maybeRecordTrackOutcome({
       ...pos,
       status: "EXPIRED",
       exitPremium,
@@ -672,8 +971,7 @@ export function portfolioSummary(
   let realized = 0;
   for (const p of account.positions) {
     if (p.status === "OPEN") {
-      const key = p.tradingSymbol ?? `${p.underlying}-${p.strike}-${p.optionType}`;
-      const mark = marks[key] ?? p.entryPremium;
+      const mark = markPremiumFromMap(p, marks) ?? p.entryPremium;
       unrealized += unrealizedPnl({
         action: p.action,
         entryPremium: p.entryPremium,

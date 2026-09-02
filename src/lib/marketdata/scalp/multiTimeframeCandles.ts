@@ -35,14 +35,18 @@ function emptySeries(interval: ScalpTimeframe): ScalpCandleSeries {
 }
 
 /**
- * Fetch one timeframe, persist when possible, fall back to DB cache on Angel failure.
+ * Fetch one timeframe, optionally persist, fall back to DB cache on Angel failure.
+ * `persist` defaults true for request-path cache fill; poll job sets false and
+ * writes once after the full MTF bundle (avoids double upsert egress).
  */
 async function fetchOneTimeframe(
   underlying: Underlying,
   interval: ScalpTimeframe,
+  opts?: { persist?: boolean },
 ): Promise<{ series: ScalpCandleSeries; degradeReason?: string }> {
   const lookbackDays = SCALP_LOOKBACK_DAYS[interval];
   const fetchedAt = new Date().toISOString();
+  const persist = opts?.persist !== false;
 
   try {
     const candles = await getUnderlyingCandles(
@@ -52,9 +56,11 @@ async function fetchOneTimeframe(
     );
     const source = isDemoMarketDataMode() ? "demo" : "angel";
     // Persist best-effort — never block the response path on store failure.
-    void upsertMarketCandles({ underlying, interval, candles, source }).catch(
-      () => undefined,
-    );
+    if (persist) {
+      void upsertMarketCandles({ underlying, interval, candles, source }).catch(
+        () => undefined,
+      );
+    }
 
     return {
       series: {
@@ -96,6 +102,7 @@ async function fetchOneTimeframe(
 
 async function buildMultiTimeframeBundle(
   underlying: Underlying,
+  opts?: { persist?: boolean },
 ): Promise<MultiTimeframeCandleBundle> {
   const series = {} as Record<ScalpTimeframe, ScalpCandleSeries>;
   const degradeReasons: string[] = [];
@@ -104,6 +111,7 @@ async function buildMultiTimeframeBundle(
     const { series: s, degradeReason } = await fetchOneTimeframe(
       underlying,
       interval,
+      { persist: opts?.persist },
     );
     series[interval] = s;
     if (degradeReason) degradeReasons.push(degradeReason);
@@ -126,9 +134,14 @@ async function buildMultiTimeframeBundle(
  */
 export async function getMultiTimeframeCandles(
   underlying: Underlying,
-  opts?: { forceRefresh?: boolean },
+  opts?: {
+    forceRefresh?: boolean;
+    /** Persist candles (default true). Poll job uses false then writes once. */
+    persist?: boolean;
+  },
 ): Promise<MultiTimeframeCandleBundle> {
   const cacheKey = `scalp:mtf:${underlying}`;
+  const persist = opts?.persist;
 
   if (!opts?.forceRefresh) {
     const fromRedis = await cacheGet<MultiTimeframeCandleBundle>(cacheKey);
@@ -142,7 +155,7 @@ export async function getMultiTimeframeCandles(
       cacheKey,
       SCALP_CANDLE_BUNDLE_TTL_SEC * 1000,
       async () => {
-        const built = await buildMultiTimeframeBundle(underlying);
+        const built = await buildMultiTimeframeBundle(underlying, { persist });
         await cacheSet(cacheKey, built, SCALP_CANDLE_BUNDLE_TTL_SEC);
         return built;
       },
@@ -151,7 +164,7 @@ export async function getMultiTimeframeCandles(
     return bundle;
   }
 
-  const bundle = await buildMultiTimeframeBundle(underlying);
+  const bundle = await buildMultiTimeframeBundle(underlying, { persist });
   await cacheSet(cacheKey, bundle, SCALP_CANDLE_BUNDLE_TTL_SEC);
   scalpCandleHub.publish(bundle);
   return bundle;
@@ -168,6 +181,7 @@ export type ScalpCandlePollResult = {
 /**
  * Rate-aware job: poll all underlyings × scalp timeframes with batching + delay.
  * Idempotent upserts — safe to re-run.
+ * Fetches without inline persist, then writes once per TF (no double upsert).
  */
 export async function pollScalpCandles(opts?: {
   underlyings?: Underlying[];
@@ -180,9 +194,10 @@ export async function pollScalpCandles(opts?: {
 
   for (let i = 0; i < underlyings.length; i++) {
     const underlying = underlyings[i]!;
-    // Poll jobs always force-refresh so upserts reflect live Angel data.
+    // Force-refresh Angel data; persist:false so we don't write during fetch.
     const bundle = await getMultiTimeframeCandles(underlying, {
       forceRefresh: true,
+      persist: false,
     });
 
     let written = 0;

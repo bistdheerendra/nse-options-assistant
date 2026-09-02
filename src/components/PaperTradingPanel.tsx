@@ -5,12 +5,26 @@ import { LiveBadge } from "@/components/LiveBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { SpotPriceMarker } from "@/components/SpotPriceMarker";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
+import { useOpenPositionMarks } from "@/hooks/useOpenPositionMarks";
 import { useOptionChainLiveStream } from "@/hooks/useOptionChainLiveStream";
 import {
   defaultPremiumTpSl,
   premiumExitHit,
   unrealizedPnl,
 } from "@/lib/paperTrading/pnl";
+import {
+  premiumsDiffer,
+  removePosition,
+  replacePositionId,
+  summaryFromAccount,
+  upsertPosition,
+  type ClientAccount,
+} from "@/lib/paperTrading/clientAccount";
+import {
+  marksRecordForPositions,
+  resolveLiveMark,
+} from "@/lib/paperTrading/positionMarkLookup";
+import { clientPaperTiming } from "@/lib/paperTrading/timing";
 import { theme } from "@/lib/theme";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import {
@@ -43,6 +57,7 @@ type ChainContract = {
 
 type PositionRow = {
   id: string;
+  accountId: string;
   underlying: string;
   strike: number;
   optionType: string;
@@ -58,10 +73,13 @@ type PositionRow = {
   realizedPnl?: number | null;
   closeReason?: string | null;
   mode: string;
+  symbolToken?: string | null;
   tradingSymbol?: string | null;
   openedAt?: string;
   closedAt?: string | null;
   entrySnapshot?: unknown;
+  pending?: "opening" | "closing";
+  fillCorrected?: boolean;
 };
 
 function slTpLabel(snap: unknown): {
@@ -93,8 +111,12 @@ function slTpLabel(snap: unknown): {
 }
 
 type Account = {
+  id: string;
+  name: string;
   cashBalance: number;
   startingCash: number;
+  createdAt: string;
+  updatedAt: string;
   positions: PositionRow[];
 };
 
@@ -269,6 +291,7 @@ function BuyOrderPanel({
   busy,
   onSubmit,
   disabled,
+  premiumCapturedAt,
 }: {
   selected: ChainContract | null;
   lots: number;
@@ -287,6 +310,7 @@ function BuyOrderPanel({
   busy: boolean;
   onSubmit: () => void;
   disabled: boolean;
+  premiumCapturedAt: string | null;
 }) {
   const entry = selected?.ltp ?? null;
   const slNum = Number(stopLoss);
@@ -308,7 +332,14 @@ function BuyOrderPanel({
 
       <FieldRow label="Price">
         {selected ? (
-          <span className="text-binance-muted">Market · ₹{selected.ltp.toFixed(2)}</span>
+          <span className="text-binance-muted">
+            Market · ₹{selected.ltp.toFixed(2)}
+            {premiumCapturedAt && (
+              <span className="mt-0.5 block text-[10px]">
+                live {new Date(premiumCapturedAt).toLocaleTimeString("en-IN")}
+              </span>
+            )}
+          </span>
         ) : (
           <span className="text-binance-muted">—</span>
         )}
@@ -479,6 +510,9 @@ export function PaperTradingPanel() {
   } = useOptionChainLiveStream(underlying);
 
   const { cards: liveCards, live: indexLive } = useDashboardLiveStream();
+  const hasOpenPositions =
+    account?.positions.some((p) => p.status === "OPEN") ?? false;
+  const polledMarks = useOpenPositionMarks(hasOpenPositions);
   const liveSpot = useMemo(() => {
     const card = liveCards.find((c) => c.id === underlying);
     return card && Number.isFinite(card.ltp) ? card.ltp : null;
@@ -493,6 +527,22 @@ export function PaperTradingPanel() {
     }
     return liveSpot;
   }, [liveSpot, streamSpot]);
+
+  const combinedMarks = useMemo(
+    () =>
+      marksRecordForPositions(
+        account?.positions.filter((p) => p.status === "OPEN") ?? [],
+        contracts,
+        polledMarks,
+        underlying,
+      ),
+    [account, contracts, polledMarks, underlying],
+  );
+
+  const displaySummary = useMemo(() => {
+    if (!account) return summary;
+    return summaryFromAccount(account, combinedMarks);
+  }, [account, combinedMarks, summary]);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/paper");
@@ -538,28 +588,23 @@ export function PaperTradingPanel() {
   // Auto-close open positions when live mark hits premium TP or SL
   useEffect(() => {
     const openRows = account?.positions.filter((p) => p.status === "OPEN") ?? [];
-    if (!openRows.length || !contracts.length || checkingExitsRef.current) return;
+    if (!openRows.length || checkingExitsRef.current) return;
+    if (!contracts.length && Object.keys(polledMarks).length === 0) return;
 
-    const marks: Record<string, number> = {};
+    const marks = marksRecordForPositions(
+      openRows,
+      contracts,
+      polledMarks,
+      underlying,
+    );
     let anyHit = false;
     for (const p of openRows) {
-      const match = contracts.find(
-        (c) =>
-          c.strike === p.strike &&
-          c.optionType === p.optionType &&
-          (p.tradingSymbol
-            ? c.tradingsymbol === p.tradingSymbol
-            : p.underlying === underlying),
-      );
-      if (!match) continue;
-      const key =
-        p.tradingSymbol ?? `${p.underlying}-${p.strike}-${p.optionType}`;
-      marks[key] = match.ltp;
-      marks[`${p.underlying}-${p.strike}-${p.optionType}`] = match.ltp;
+      const matchLtp = resolveLiveMark(p, contracts, polledMarks, underlying);
+      if (matchLtp == null) continue;
       const levels = levelsFor(p);
       const hit = premiumExitHit({
         action: p.action === "SELL" ? "SELL" : "BUY",
-        markPremium: match.ltp,
+        markPremium: matchLtp,
         stopLoss: levels.stopLoss,
         takeProfit: levels.takeProfit,
       });
@@ -578,8 +623,24 @@ export function PaperTradingPanel() {
         const json = await res.json();
         if (!res.ok) return;
         if (Array.isArray(json.closed) && json.closed.length > 0) {
-          setAccount(json.account);
-          setSummary(json.summary);
+          setAccount((prev) => {
+            if (!prev) return prev;
+            let next: ClientAccount = prev;
+            for (const c of json.closed as Array<{
+              position?: PositionRow;
+            }>) {
+              if (!c.position) continue;
+              next = upsertPosition(
+                next,
+                { ...c.position, pending: undefined },
+                typeof json.cashBalance === "number"
+                  ? json.cashBalance
+                  : next.cashBalance,
+              );
+            }
+            setSummary(summaryFromAccount(next, {}));
+            return next;
+          });
           const parts = json.closed.map(
             (c: { reason: string; exitPremium: number }) =>
               `${c.reason} @ ₹${Number(c.exitPremium).toFixed(2)}`,
@@ -590,9 +651,9 @@ export function PaperTradingPanel() {
         checkingExitsRef.current = false;
       }
     })();
-  }, [account, contracts, underlying]);
+  }, [account, contracts, polledMarks, underlying]);
 
-  const cashBalance = summary?.cashBalance ?? account?.cashBalance ?? 0;
+  const cashBalance = displaySummary?.cashBalance ?? account?.cashBalance ?? 0;
 
   const maxBuyLots = useMemo(() => {
     if (!selected || selected.ltp <= 0) return 0;
@@ -645,8 +706,47 @@ export function PaperTradingPanel() {
       setMsg("Set valid premium SL (< entry) and TP (> entry) before buying.");
       return;
     }
+    const entryPremium = selected.ltp;
+    const capturedAt = chainUpdatedAt ?? new Date().toISOString();
+    const optimisticId = `optimistic_${Date.now()}`;
+    const cashDelta = -entryPremium * selected.lotSize * buyLots;
+    const prevCash = cashBalance;
+    const optimisticRow: PositionRow = {
+      id: optimisticId,
+      accountId: account?.id ?? "paper_pending",
+      underlying,
+      strike: selected.strike,
+      optionType: selected.optionType,
+      expiry: selected.expiry,
+      action: "BUY",
+      lotSize: selected.lotSize,
+      lots: buyLots,
+      entryPremium,
+      stopLoss,
+      takeProfit,
+      status: "OPEN",
+      mode,
+      symbolToken: selected.symboltoken,
+      tradingSymbol: selected.tradingsymbol,
+      openedAt: new Date().toISOString(),
+      pending: "opening",
+    };
+
     setBusy(true);
-    setMsg(null);
+    setMsg(
+      `Opening ${selected.optionType} ${formatStrike(selected.strike)} @ ₹${entryPremium.toFixed(2)} · live ${new Date(capturedAt).toLocaleTimeString("en-IN")}`,
+    );
+    if (account) {
+      const next = upsertPosition(
+        account,
+        optimisticRow,
+        account.cashBalance + cashDelta,
+      );
+      setAccount(next);
+      setSummary(summaryFromAccount(next, {}));
+    }
+
+    const tClient = performance.now();
     try {
       const res = await fetch("/api/paper", {
         method: "POST",
@@ -659,24 +759,64 @@ export function PaperTradingPanel() {
           action: "BUY",
           lotSize: selected.lotSize,
           lots: buyLots,
-          entryPremium: selected.ltp,
+          entryPremium,
           mode,
           symbolToken: selected.symboltoken,
           tradingSymbol: selected.tradingsymbol,
           stopLoss,
           takeProfit,
           acknowledgeSellRisk: false,
+          premiumSource: "live-sse",
+          premiumCapturedAt: capturedAt,
         }),
       });
       const json = await res.json();
+      clientPaperTiming(
+        `client submitBuy fetch+parse ${(performance.now() - tClient).toFixed(0)}ms entryPremium=${entryPremium}`,
+      );
       if (!res.ok) throw new Error(json.error ?? "Trade failed");
-      setAccount(json.account);
-      setSummary(json.summary);
+      const serverPos = json.position as PositionRow;
+      const corrected = premiumsDiffer(entryPremium, Number(serverPos.entryPremium));
+      setAccount((prev) => {
+        const reconciled: PositionRow = {
+          ...serverPos,
+          pending: undefined,
+          fillCorrected: corrected,
+        };
+        if (!prev) {
+          const created: ClientAccount = {
+            id: String(json.accountId ?? "paper_default"),
+            name: "Default Paper Account",
+            cashBalance: Number(json.cashBalance),
+            startingCash: 100_000,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            positions: [reconciled],
+          };
+          setSummary(summaryFromAccount(created, {}));
+          return created;
+        }
+        const next = replacePositionId(
+          prev,
+          optimisticId,
+          reconciled,
+          Number(json.cashBalance),
+        );
+        setSummary(summaryFromAccount(next, {}));
+        return next;
+      });
       setMsg(
-        json.note ??
-          `Paper trade placed · SL ₹${stopLoss.toFixed(2)} · TP ₹${takeProfit.toFixed(2)}`,
+        corrected
+          ? `Fill corrected: ₹${entryPremium.toFixed(2)} → ₹${Number(serverPos.entryPremium).toFixed(2)} (server)`
+          : `Paper trade placed · ₹${Number(serverPos.entryPremium).toFixed(2)} · live ${new Date(capturedAt).toLocaleTimeString("en-IN")} · SL ₹${stopLoss.toFixed(2)} · TP ₹${takeProfit.toFixed(2)}`,
       );
     } catch (e) {
+      setAccount((prev) => {
+        if (!prev) return prev;
+        const next = removePosition(prev, optimisticId, prevCash);
+        setSummary(summaryFromAccount(next, {}));
+        return next;
+      });
       setMsg(e instanceof Error ? e.message : "Failed");
     } finally {
       setBusy(false);
@@ -684,15 +824,7 @@ export function PaperTradingPanel() {
   }
 
   function liveMarkForPosition(p: Account["positions"][number]): number | null {
-    const match = contracts.find(
-      (c) =>
-        c.strike === p.strike &&
-        c.optionType === p.optionType &&
-        (p.tradingSymbol
-          ? c.tradingsymbol === p.tradingSymbol
-          : p.underlying === underlying),
-    );
-    return match?.ltp ?? null;
+    return resolveLiveMark(p, contracts, polledMarks, underlying);
   }
 
   function markPremiumForPosition(p: Account["positions"][number]): number {
@@ -702,8 +834,42 @@ export function PaperTradingPanel() {
   async function exitPosition(p: Account["positions"][number]) {
     setExitingId(p.id);
     setExitMsg(null);
+    const exitPremium = markPremiumForPosition(p);
+    const capturedAt = chainUpdatedAt ?? new Date().toISOString();
+    const prevCash = cashBalance;
+    const closeCash =
+      p.action === "BUY"
+        ? exitPremium * p.lotSize * p.lots
+        : -exitPremium * p.lotSize * p.lots;
+    const realized =
+      p.action === "BUY"
+        ? (exitPremium - p.entryPremium) * p.lotSize * p.lots
+        : (p.entryPremium - exitPremium) * p.lotSize * p.lots;
+
+    if (account) {
+      const optimistic: PositionRow = {
+        ...p,
+        status: "CLOSED",
+        exitPremium,
+        realizedPnl: realized,
+        closeReason: "MANUAL",
+        closedAt: new Date().toISOString(),
+        pending: "closing",
+      };
+      const next = upsertPosition(
+        account,
+        optimistic,
+        account.cashBalance + closeCash,
+      );
+      setAccount(next);
+      setSummary(summaryFromAccount(next, {}));
+    }
+    setExitMsg(
+      `Closing ${p.underlying} ${p.strike} ${p.optionType} @ ₹${exitPremium.toFixed(2)} · live ${new Date(capturedAt).toLocaleTimeString("en-IN")}`,
+    );
+
+    const tClient = performance.now();
     try {
-      const exitPremium = markPremiumForPosition(p);
       const res = await fetch("/api/paper/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -714,13 +880,41 @@ export function PaperTradingPanel() {
         }),
       });
       const json = await res.json();
+      clientPaperTiming(
+        `client exitPosition fetch+parse ${(performance.now() - tClient).toFixed(0)}ms exitPremium=${exitPremium}`,
+      );
       if (!res.ok) throw new Error(json.error ?? "Exit failed");
-      setAccount(json.account);
-      setSummary(json.summary);
+      const serverPos = json.position as PositionRow;
+      const corrected = premiumsDiffer(
+        exitPremium,
+        Number(serverPos.exitPremium ?? exitPremium),
+      );
+      setAccount((prev) => {
+        if (!prev) return prev;
+        const next = upsertPosition(
+          prev,
+          { ...serverPos, pending: undefined, fillCorrected: corrected },
+          Number(json.cashBalance),
+        );
+        setSummary(summaryFromAccount(next, {}));
+        return next;
+      });
       setExitMsg(
-        `Exited ${p.underlying} ${p.strike} ${p.optionType} @ ₹${exitPremium.toFixed(2)} — ${json.note ?? "closed"}`,
+        corrected
+          ? `Exit corrected: ₹${exitPremium.toFixed(2)} → ₹${Number(serverPos.exitPremium).toFixed(2)} (server)`
+          : `Exited ${p.underlying} ${p.strike} ${p.optionType} @ ₹${Number(serverPos.exitPremium ?? exitPremium).toFixed(2)} · live ${new Date(capturedAt).toLocaleTimeString("en-IN")}`,
       );
     } catch (e) {
+      setAccount((prev) => {
+        if (!prev) return prev;
+        const next = upsertPosition(
+          prev,
+          { ...p, pending: undefined, status: "OPEN", exitPremium: null, realizedPnl: null, closedAt: null },
+          prevCash,
+        );
+        setSummary(summaryFromAccount(next, {}));
+        return next;
+      });
       setExitMsg(e instanceof Error ? e.message : "Exit failed");
     } finally {
       setExitingId(null);
@@ -789,13 +983,13 @@ export function PaperTradingPanel() {
         </p>
       </section>
 
-      {summary && (
+      {displaySummary && (
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           {[
-            ["Cash Balance", summary.cashBalance],
-            ["Portfolio Value", summary.totalPortfolioValue],
-            ["Realized P&L", summary.realizedPnl],
-            ["Unrealized P&L", summary.unrealizedPnl],
+            ["Cash Balance", displaySummary.cashBalance],
+            ["Portfolio Value", displaySummary.totalPortfolioValue],
+            ["Realized P&L", displaySummary.realizedPnl],
+            ["Unrealized P&L", displaySummary.unrealizedPnl],
           ].map(([label, value]) => (
             <div key={String(label)} className="rounded-lg bg-binance-surface p-3">
               <p className="text-xs text-binance-muted">{label}</p>
@@ -995,6 +1189,7 @@ export function PaperTradingPanel() {
             busy={busy}
             onSubmit={() => void submitBuy()}
             disabled={formDisabled}
+            premiumCapturedAt={chainUpdatedAt}
           />
 
           {msg && (
@@ -1051,12 +1246,24 @@ export function PaperTradingPanel() {
                       )}
                     </td>
                     <td className="px-3 py-2">{p.action}</td>
-                    <td className="px-3 py-2 tabular-nums">{p.entryPremium}</td>
+                    <td className="px-3 py-2 tabular-nums">
+                      {p.entryPremium}
+                      {p.fillCorrected && (
+                        <span className="mt-0.5 block text-[10px] text-binance-gold">
+                          fill corrected
+                        </span>
+                      )}
+                      {p.pending === "opening" && (
+                        <span className="mt-0.5 block text-[10px] text-binance-gold">
+                          opening…
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 tabular-nums">
                       {liveMark != null ? (
                         liveMark.toFixed(2)
                       ) : (
-                        <span className="text-binance-muted" title="Switch underlying to load live mark">
+                        <span className="text-binance-muted" title="Waiting for live mark (other underlying or expiry)">
                           —
                         </span>
                       )}
@@ -1110,15 +1317,19 @@ export function PaperTradingPanel() {
                     <td className="px-3 py-2 text-right">
                       <button
                         type="button"
-                        disabled={exitingId === p.id}
+                        disabled={exitingId === p.id || p.pending === "opening"}
                         onClick={() => void exitPosition(p)}
                         title={`Exit @ ₹${mark.toFixed(2)} (live mark or entry)`}
                         className="inline-flex items-center gap-1.5 rounded border border-binance-bear/50 px-2.5 py-1 text-binance-bear hover:bg-binance-bear/10 disabled:opacity-50"
                       >
-                        {exitingId === p.id && (
+                        {(exitingId === p.id || p.pending === "opening") && (
                           <Loader2 className="h-3 w-3 animate-spin" />
                         )}
-                        Exit
+                        {p.pending === "opening"
+                          ? "Opening"
+                          : exitingId === p.id
+                            ? "Closing"
+                            : "Exit"}
                       </button>
                     </td>
                   </tr>
@@ -1177,6 +1388,16 @@ export function PaperTradingPanel() {
                       <td className="px-3 py-2 tabular-nums">{p.entryPremium}</td>
                       <td className="px-3 py-2 tabular-nums">
                         {p.exitPremium != null ? Number(p.exitPremium).toFixed(2) : "—"}
+                        {p.fillCorrected && (
+                          <span className="mt-0.5 block text-[10px] text-binance-gold">
+                            fill corrected
+                          </span>
+                        )}
+                        {p.pending === "closing" && (
+                          <span className="mt-0.5 block text-[10px] text-binance-gold">
+                            closing…
+                          </span>
+                        )}
                       </td>
                       <td
                         className="px-3 py-2 tabular-nums text-binance-bear"

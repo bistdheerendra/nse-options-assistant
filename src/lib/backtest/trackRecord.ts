@@ -252,14 +252,27 @@ export async function computeSampleStatus(): Promise<SampleStatus> {
 /** Persist inferred synthesisVersion onto untagged DB / file rows (additive, idempotent). */
 async function tagUntaggedOutcomes(rows: Outcome[]): Promise<void> {
   if (hasDatabase() && prisma) {
-    for (const row of rows) {
-      try {
-        await prisma.backtestOutcome.updateMany({
-          where: { id: row.id, synthesisVersion: null },
-          data: { synthesisVersion: row.synthesisVersion },
-        });
-      } catch {
-        // Column may not exist yet before db push — ignore; in-memory still tagged
+    const untagged = rows.filter((r) => r.synthesisVersion);
+    const byVersion = new Map<SynthesisVersion, string[]>();
+    for (const row of untagged) {
+      // Only rows that still need a DB stamp (caller already inferred in memory)
+      const list = byVersion.get(row.synthesisVersion) ?? [];
+      list.push(row.id);
+      byVersion.set(row.synthesisVersion, list);
+    }
+    for (const [version, ids] of byVersion) {
+      // Chunk IN lists; updateMany returns count only (no row egress).
+      const chunkSize = 100;
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize);
+        try {
+          await prisma.backtestOutcome.updateMany({
+            where: { id: { in: chunk }, synthesisVersion: null },
+            data: { synthesisVersion: version },
+          });
+        } catch {
+          // Column may not exist yet before db push — ignore
+        }
       }
     }
     return;
@@ -279,24 +292,34 @@ export async function tagTradeIdeaSynthesisVersions(): Promise<{
     const ideas = await prisma.tradeIdea.findMany({
       where: { synthesisVersion: null },
       select: { id: true, featureSnapshot: true, createdAt: true },
+      take: 200,
     });
     scanned = ideas.length;
+    const byVersion = new Map<SynthesisVersion, string[]>();
     for (const idea of ideas) {
       const version = inferSynthesisVersion({
         featureSnapshot: idea.featureSnapshot,
         decidedAt: idea.createdAt,
       });
-      await prisma.tradeIdea.update({
-        where: { id: idea.id },
+      const list = byVersion.get(version) ?? [];
+      list.push(idea.id);
+      byVersion.set(version, list);
+    }
+    for (const [version, ids] of byVersion) {
+      await prisma.tradeIdea.updateMany({
+        where: { id: { in: ids }, synthesisVersion: null },
         data: { synthesisVersion: version },
       });
-      tagged += 1;
+      tagged += ids.length;
     }
   } catch {
     // Schema not pushed yet
   }
   return { scanned, tagged };
 }
+
+/** Cap track-record reads — prevents unbounded SELECT * as the table grows. */
+const BACKTEST_OUTCOME_TAKE = 5_000;
 
 /** Seed a few demo outcomes in time order if empty — labeled experimental + legacy. */
 async function ensureSeed(): Promise<Outcome[]> {
@@ -306,6 +329,20 @@ async function ensureSeed(): Promise<Outcome[]> {
     try {
       const dbRows = await prisma.backtestOutcome.findMany({
         orderBy: { decidedAt: "asc" },
+        take: BACKTEST_OUTCOME_TAKE,
+        select: {
+          id: true,
+          underlying: true,
+          mode: true,
+          structureBranch: true,
+          laneScores: true,
+          realizedPnl: true,
+          won: true,
+          decidedAt: true,
+          resolvedAt: true,
+          synthesisVersion: true,
+          tradeIdeaId: true,
+        },
       });
       rows = dbRows.map(mapDbRow);
     } catch {

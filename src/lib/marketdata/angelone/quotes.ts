@@ -3,6 +3,45 @@ import { mockLtp } from "./mock";
 import type { LtpQuote, Underlying } from "./types";
 import { UNDERLYING_META } from "./types";
 
+export type OptionLtpQuote = {
+  symbolToken: string;
+  tradingSymbol: string;
+  ltp: number;
+};
+
+/**
+ * Batch option LTP via Angel market quote (LTP mode).
+ * exchangeTokens keys are NFO / BFO (or NSE/BSE). Chunked at 50.
+ */
+export async function quoteOptionLtps(
+  exchangeTokens: Record<string, string[]>,
+): Promise<OptionLtpQuote[]> {
+  const out: OptionLtpQuote[] = [];
+  for (const [exchange, tokens] of Object.entries(exchangeTokens)) {
+    const unique = [...new Set(tokens.filter(Boolean))];
+    for (let i = 0; i < unique.length; i += 50) {
+      const chunk = unique.slice(i, i + 50);
+      const data = await angelPost<{
+        fetched?: Array<Record<string, unknown>>;
+      }>("/rest/secure/angelbroking/market/v1/quote", {
+        mode: "LTP",
+        exchangeTokens: { [exchange]: chunk },
+      });
+      for (const row of data?.fetched ?? []) {
+        const symbolToken = String(row.symbolToken ?? row.symboltoken ?? "");
+        const ltp = Number(row.ltp ?? 0);
+        if (!symbolToken || !Number.isFinite(ltp) || ltp <= 0) continue;
+        out.push({
+          symbolToken,
+          tradingSymbol: String(row.tradingSymbol ?? row.tradingsymbol ?? ""),
+          ltp,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 export async function getLtp(params: {
   exchange: string;
   tradingsymbol: string;

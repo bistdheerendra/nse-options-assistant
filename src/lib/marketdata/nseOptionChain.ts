@@ -148,6 +148,7 @@ function mapSide(
 export async function getNseOptionChain(
   underlying: "NIFTY" | "BANKNIFTY",
   preferredExpiryIso?: string,
+  opts?: { includeStrikes?: number[] },
 ): Promise<OptionChainResult> {
   const cookie = await nseSessionCookie();
   const info = await nseGetJson<{ expiryDates?: string[] }>(
@@ -185,8 +186,10 @@ export async function getNseOptionChain(
   const step = underlying === "NIFTY" ? 50 : 100;
   const atm = Math.round(spot / step) * step;
 
+  const include = new Set(opts?.includeStrikes ?? []);
   const rows = (payload.records?.data ?? []).filter((r) => {
     const k = Number(r.strikePrice ?? 0);
+    if (include.has(k)) return true;
     return Math.abs(k - atm) <= step * 12;
   });
 

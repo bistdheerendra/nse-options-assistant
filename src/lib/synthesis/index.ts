@@ -414,6 +414,8 @@ export async function runSynthesis(params: {
           featureSnapshot: featureSnapshot as Prisma.InputJsonValue,
           synthesisVersion: CURRENT_SYNTHESIS_VERSION,
         },
+        // Egress: only need the id for Mark-as-taken / auto-paper links.
+        select: { id: true },
       });
       tradeIdeaId = row.id;
       persisted = true;

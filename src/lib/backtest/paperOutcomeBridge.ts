@@ -119,6 +119,12 @@ export async function recordOutcomeFromClosedPosition(
     if (hasDatabase() && prisma) {
       const idea = await prisma.tradeIdea.findUnique({
         where: { id: tradeIdeaId },
+        select: {
+          structureAction: true,
+          featureSnapshot: true,
+          createdAt: true,
+          synthesisVersion: true,
+        },
       });
       if (!idea) {
         return { recorded: false, reason: "idea_missing" };

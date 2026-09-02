@@ -10,7 +10,10 @@ import { SampleStatusBadge } from "@/components/SampleStatusCard";
 import { ScalpSignalCard } from "@/components/ScalpSignalCard";
 import type { SmcSignal } from "@/lib/marketdata/smc";
 import { useDashboardLiveStream } from "@/hooks/useDashboardLiveStream";
+import { useOptionChainLiveStream } from "@/hooks/useOptionChainLiveStream";
 import { useScalpCandlesLiveStream } from "@/hooks/useScalpCandlesLiveStream";
+import { premiumsDiffer } from "@/lib/paperTrading/clientAccount";
+import { clientPaperTiming } from "@/lib/paperTrading/timing";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -193,6 +196,45 @@ function fmt(n: number | null | undefined, digits = 2): string {
   });
 }
 
+function resolveLiveFill(params: {
+  strike: number;
+  optionType: "CE" | "PE";
+  tradingsymbol: string;
+  symboltoken: string;
+  synthesisPremium: number;
+  contracts: Array<{
+    strike: number;
+    optionType: "CE" | "PE";
+    tradingsymbol: string;
+    symboltoken: string;
+    ltp: number;
+  }>;
+  fetchedAt: string | null;
+}): {
+  premium: number;
+  capturedAt: string;
+  source: "live-sse" | "synthesis-rest";
+} {
+  const match = params.contracts.find(
+    (c) =>
+      c.tradingsymbol === params.tradingsymbol ||
+      c.symboltoken === params.symboltoken ||
+      (c.strike === params.strike && c.optionType === params.optionType),
+  );
+  if (match && Number.isFinite(match.ltp) && match.ltp > 0) {
+    return {
+      premium: match.ltp,
+      capturedAt: params.fetchedAt ?? new Date().toISOString(),
+      source: "live-sse",
+    };
+  }
+  return {
+    premium: params.synthesisPremium,
+    capturedAt: new Date().toISOString(),
+    source: "synthesis-rest",
+  };
+}
+
 export function AnalysisPanel() {
   const searchParams = useSearchParams();
   const [underlying, setUnderlying] = useState<Underlying>(() =>
@@ -316,6 +358,12 @@ export function AnalysisPanel() {
     return card && Number.isFinite(card.ltp) ? card.ltp : null;
   }, [cards, underlying]);
 
+  const {
+    contracts: chainContracts,
+    fetchedAt: chainFetchedAt,
+    live: chainLive,
+  } = useOptionChainLiveStream(underlying);
+
   // Scalp MTF candles: SSE push with REST poll fallback (delivery only).
   const scalpMtf = useScalpCandlesLiveStream(underlying, mode === "SCALP");
 
@@ -339,6 +387,29 @@ export function AnalysisPanel() {
     }
   }, [underlying, mode]);
 
+  /** Soft MTF-driven refresh — same UI update, no new TradeIdea row (egress). */
+  const softRun = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/synthesis?underlying=${underlying}&mode=${mode}&persist=false`,
+      );
+      const json = await res.json();
+      if (!res.ok) return;
+      setData((prev) => {
+        if (!prev) return json;
+        // Keep last persisted idea id so Mark-as-taken still works after soft refresh.
+        return {
+          ...json,
+          tradeIdeaId: json.tradeIdeaId ?? prev.tradeIdeaId,
+          persisted: json.persisted || prev.persisted,
+        };
+      });
+      setError(null);
+    } catch {
+      // Soft refresh failures are non-fatal; keep last good verdict.
+    }
+  }, [underlying, mode]);
+
   // Soft-refresh synthesis when MTF content hash changes (skip first seed frame).
   const scalpMtfHashRef = useRef<string | null>(null);
   useEffect(() => {
@@ -349,8 +420,8 @@ export function AnalysisPanel() {
     if (scalpMtfHashRef.current === scalpMtf.contentHash) return;
     const prev = scalpMtfHashRef.current;
     scalpMtfHashRef.current = scalpMtf.contentHash;
-    if (prev != null) void run();
-  }, [mode, scalpMtf.contentHash, run]);
+    if (prev != null) void softRun();
+  }, [mode, scalpMtf.contentHash, softRun]);
 
   // Standalone SMC fetch — not part of §2.5 synthesis
   useEffect(() => {
@@ -410,8 +481,24 @@ export function AnalysisPanel() {
       setMarkMsg("Acknowledge sell/write risk before marking as taken.");
       return;
     }
+    const fill = resolveLiveFill({
+      strike: c.strike,
+      optionType: c.optionType,
+      tradingsymbol: c.tradingsymbol,
+      symboltoken: c.symboltoken,
+      synthesisPremium: c.entryPremium,
+      contracts: chainContracts,
+      fetchedAt: chainFetchedAt,
+    });
+    const sourceLabel =
+      fill.source === "live-sse"
+        ? `live ${new Date(fill.capturedAt).toLocaleTimeString("en-IN")}`
+        : "synthesis snapshot (chain SSE unavailable)";
+    const optimisticMsg = `Opening paper ${data.structure.action} ${c.optionType} ${fmt(c.strike, 0)} @ ₹${fmt(fill.premium)} · ${sourceLabel}`;
     setMarking(true);
-    setMarkMsg(null);
+    setMarkOk(true);
+    setMarkMsg(optimisticMsg);
+    const tClient = performance.now();
     try {
       const res = await fetch("/api/paper", {
         method: "POST",
@@ -424,26 +511,33 @@ export function AnalysisPanel() {
           action: data.structure.action,
           lotSize: c.lotSize,
           lots: 1,
-          entryPremium: c.entryPremium,
+          entryPremium: fill.premium,
           mode: data.mode,
           symbolToken: c.symboltoken,
           tradingSymbol: c.tradingsymbol,
           acknowledgeSellRisk: ackSell,
           tradeIdeaId: data.tradeIdeaId,
-          // Same spot levels as the verdict card (Entry / SL / TP1 / TP2)
+          premiumSource: fill.source,
+          premiumCapturedAt: fill.capturedAt,
           entrySpotAtSignal: data.tradePlan.entry,
           stopLossSpot: data.tradePlan.stopLoss ?? undefined,
           tp1Spot: data.tradePlan.takeProfit1 ?? undefined,
           tp2Spot: data.tradePlan.takeProfit2 ?? undefined,
-          // Angel Greeks delta when chain merge succeeded; else multiplier fallback
           delta: c.delta ?? undefined,
         }),
       });
       const json = await res.json();
+      clientPaperTiming(
+        `client markAsTaken fetch+parse ${(performance.now() - tClient).toFixed(0)}ms entryPremium=${fill.premium} source=${fill.source}`,
+      );
       if (!res.ok) throw new Error(json.error ?? "Paper open failed");
+      const serverPremium = Number(json.position?.entryPremium ?? fill.premium);
+      const corrected = premiumsDiffer(fill.premium, serverPremium);
       setMarkOk(true);
       setMarkMsg(
-        `Paper ${data.structure.action} ${c.optionType} ${fmt(c.strike, 0)} @ ₹${fmt(c.entryPremium)} opened (paper only).`,
+        corrected
+          ? `Fill corrected: ₹${fmt(fill.premium)} → ₹${fmt(serverPremium)} (server). Paper ${data.structure.action} ${c.optionType} ${fmt(c.strike, 0)} opened.`
+          : `Paper ${data.structure.action} ${c.optionType} ${fmt(c.strike, 0)} @ ₹${fmt(serverPremium)} opened · ${sourceLabel} (paper only).`,
       );
     } catch (e) {
       setMarkOk(false);
@@ -451,7 +545,7 @@ export function AnalysisPanel() {
     } finally {
       setMarking(false);
     }
-  }, [data, ackSell]);
+  }, [data, ackSell, chainContracts, chainFetchedAt]);
 
   const side = data?.tradePlan.sideLabel ?? "FLAT";
   const sideColor =
@@ -484,6 +578,20 @@ export function AnalysisPanel() {
     Boolean(data?.tradePlan.suggestedContract) &&
     data?.structure.action !== "NONE" &&
     (!data?.structure.isSellWrite || ackSell);
+
+  const liveFill = useMemo(() => {
+    const c = data?.tradePlan.suggestedContract;
+    if (!c) return null;
+    return resolveLiveFill({
+      strike: c.strike,
+      optionType: c.optionType,
+      tradingsymbol: c.tradingsymbol,
+      symboltoken: c.symboltoken,
+      synthesisPremium: c.entryPremium,
+      contracts: chainContracts,
+      fetchedAt: chainFetchedAt,
+    });
+  }, [data, chainContracts, chainFetchedAt]);
 
   const chartLevels = data
     ? {
@@ -742,7 +850,7 @@ export function AnalysisPanel() {
                   <p className="text-sm font-medium text-binance-gold">
                     {data.structure.branch.replaceAll("_", " ")}
                     {data.tradePlan.suggestedContract
-                      ? ` · ${fmt(data.tradePlan.suggestedContract.strike, 0)} ${data.tradePlan.suggestedContract.optionType} @ ₹${fmt(data.tradePlan.suggestedContract.entryPremium)}`
+                      ? ` · ${fmt(data.tradePlan.suggestedContract.strike, 0)} ${data.tradePlan.suggestedContract.optionType} @ ₹${fmt(liveFill?.premium ?? data.tradePlan.suggestedContract.entryPremium)}`
                       : ""}
                   </p>
                 </div>
@@ -791,6 +899,19 @@ export function AnalysisPanel() {
                     I acknowledge sell/write risk is uncapped or large (paper
                     only).
                   </label>
+                )}
+
+                {liveFill && data.tradePlan.suggestedContract && (
+                  <p className="text-xs text-binance-muted">
+                    Confirm fill{" "}
+                    <span className="font-medium tabular-nums text-binance-text">
+                      ₹{fmt(liveFill.premium)}
+                    </span>
+                    {" · "}
+                    {liveFill.source === "live-sse"
+                      ? `live ${new Date(liveFill.capturedAt).toLocaleTimeString("en-IN")}${chainLive ? " · SSE" : ""}`
+                      : "synthesis snapshot (chain SSE unavailable)"}
+                  </p>
                 )}
 
                 <button

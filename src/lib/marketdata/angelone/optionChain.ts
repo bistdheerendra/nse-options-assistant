@@ -160,14 +160,24 @@ export async function getOptionChain(
   return attachOptionGreeks(chain);
 }
 
+/** LTP/OI only — skip Greeks. Used for paper marks across underlyings/expiries. */
+export async function getOptionChainLtps(
+  underlying: Underlying,
+  expiry?: string,
+  opts?: { includeStrikes?: number[] },
+): Promise<OptionChainResult> {
+  return getOptionChainQuotes(underlying, expiry, opts);
+}
+
 /** LTP/OI/IV assembly only (NSE → Angel → demo). Greeks attached by getOptionChain. */
 async function getOptionChainQuotes(
   underlying: Underlying,
   expiry?: string,
+  opts?: { includeStrikes?: number[] },
 ): Promise<OptionChainResult> {
   if (isNseOptionChainUnderlying(underlying)) {
     try {
-      return await getNseOptionChain(underlying, expiry);
+      return await getNseOptionChain(underlying, expiry, opts);
     } catch (err) {
       console.warn(
         "[optionChain] NSE live fetch failed, falling back:",
@@ -202,8 +212,10 @@ async function getOptionChainQuotes(
   const stepGuess =
     underlying === "NIFTY" ? 50 : underlying === "BANKNIFTY" ? 100 : 100;
   const atm = Math.round(spotQuote.ltp / stepGuess) * stepGuess;
+  const include = new Set(opts?.includeStrikes ?? []);
   const near = expiryRows.filter((r) => {
     const strike = Number(r.strike) / 100; // Angel stores strike * 100
+    if (include.has(strike)) return true;
     return Math.abs(strike - atm) <= stepGuess * 10;
   });
 

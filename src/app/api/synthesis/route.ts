@@ -10,6 +10,8 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const underlying = (url.searchParams.get("underlying") ?? "NIFTY") as Underlying;
   const mode = (url.searchParams.get("mode") ?? "SWING") as TradingMode;
+  // Soft MTF refreshes use persist=false to avoid inserting a TradeIdea every minute.
+  const persist = url.searchParams.get("persist") !== "false";
 
   if (!["NIFTY", "BANKNIFTY", "SENSEX"].includes(underlying)) {
     return NextResponse.json({ error: "Invalid underlying" }, { status: 400 });
@@ -19,7 +21,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const result = await runSynthesis({ underlying, mode, persist: true });
+    const result = await runSynthesis({ underlying, mode, persist });
     return NextResponse.json(result);
   } catch (err) {
     if (isMarketDataUnavailable(err)) {

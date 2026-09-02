@@ -1,16 +1,14 @@
-import {
-  closePaperTrade,
-  closePositionsOnTpSl,
-  getOrCreateAccount,
-  portfolioSummary,
-} from "@/lib/paperTrading/account";
+import { closePaperTrade, closePositionsOnTpSl } from "@/lib/paperTrading/account";
 import type { CloseReason } from "@/lib/paperTrading/pnl";
+import { paperTiming } from "@/lib/paperTrading/timing";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const tReq = Date.now();
   const body = await req.json();
+  paperTiming("api/paper/close POST.parseBody", tReq);
 
   // Batch TP/SL check: { marks: { [tradingSymbol]: ltp } }
   if (body.marks && typeof body.marks === "object") {
@@ -20,11 +18,10 @@ export async function POST(req: Request) {
       if (Number.isFinite(n)) marks[k] = n;
     }
     const result = await closePositionsOnTpSl(marks);
-    const account = await getOrCreateAccount();
+    paperTiming("api/paper/close POST.tpSl", tReq, `closed=${result.closed.length}`);
     return NextResponse.json({
-      account,
-      summary: portfolioSummary(account, marks),
       closed: result.closed,
+      cashBalance: result.cashBalance,
       note:
         result.closed.length > 0
           ? `Auto-closed ${result.closed.length} position(s) on TP/SL (paper only).`
@@ -38,14 +35,19 @@ export async function POST(req: Request) {
       ? reasonRaw
       : "MANUAL";
 
-  const account = await closePaperTrade({
+  const tClose = Date.now();
+  const result = await closePaperTrade({
     positionId: String(body.positionId),
     exitPremium: Number(body.exitPremium),
     closeReason,
   });
+  paperTiming("api/paper/close POST.closePaperTrade", tClose);
+  paperTiming("api/paper/close POST.total", tReq);
   return NextResponse.json({
-    account,
-    summary: portfolioSummary(account, {}),
+    position: result.position,
+    cashBalance: result.cashBalance,
+    accountId: result.accountId,
+    executedAt: result.position.closedAt,
     note: "Paper close only — no broker order.",
   });
 }

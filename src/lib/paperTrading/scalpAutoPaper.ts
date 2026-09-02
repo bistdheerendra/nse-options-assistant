@@ -190,7 +190,7 @@ export async function runScalpAutoPaper(opts?: {
         lots: 1,
       });
 
-      const updated = await openPaperTrade({
+      const opened = await openPaperTrade({
         underlying,
         strike: c.strike,
         optionType: c.optionType,
@@ -230,24 +230,14 @@ export async function runScalpAutoPaper(opts?: {
       });
 
       // Refresh local account snapshot for subsequent dedupe in this run
-      account.positions = updated.positions;
-
-      const opened = updated.positions
-        .filter(
-          (p) =>
-            p.status === "OPEN" &&
-            p.underlying === underlying &&
-            p.strike === c.strike &&
-            p.optionType === c.optionType &&
-            p.action === syn.structure.action,
-        )
-        .sort((a, b) => b.openedAt.localeCompare(a.openedAt))[0];
+      account.positions.push(opened.position);
+      account.cashBalance = opened.cashBalance;
 
       items.push({
         underlying,
         opened: true,
         detail: `Paper ${syn.structure.action} ${c.optionType} ${c.strike} @ ₹${c.entryPremium} (auto)`,
-        positionId: opened?.id,
+        positionId: opened.position.id,
         tradeIdeaId: syn.tradeIdeaId,
         contract: {
           strike: c.strike,
