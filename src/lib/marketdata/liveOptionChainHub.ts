@@ -11,6 +11,13 @@ import {
   type AngelFeedStatus,
   type AngelOptionTick,
 } from "@/lib/marketdata/angelone/websocketFeed";
+import {
+  clearLargeOrderStore,
+  formatLargeOrderAlertText,
+  ingestSnapQuoteBook,
+  pruneLargeOrderTokens,
+  type LargeOrderEvent,
+} from "@/lib/marketdata/largeOrder";
 
 export type LiveOptionChainSnapshot = OptionChainResult & {
   ok: true;
@@ -34,7 +41,12 @@ export type LiveOptionChainPayload =
   | LiveOptionChainSnapshot
   | LiveOptionChainError;
 
+export type LargeOrderAlert = LargeOrderEvent & {
+  underlying: Underlying;
+};
+
 type Listener = (payload: LiveOptionChainPayload) => void;
+type LargeOrderListener = (event: LargeOrderAlert) => void;
 
 /** Full REST refresh for structure / far strikes / IV. */
 const SNAPSHOT_MS = 20_000;
@@ -45,6 +57,7 @@ const TOKEN_REFRESH_MS = 60_000;
 
 type UnderlyingState = {
   listeners: Set<Listener>;
+  largeOrderListeners: Set<LargeOrderListener>;
   chain: OptionChainResult | null;
   /** Angel token → strike/type for patch matching (NSE OC uses non-Angel ids). */
   tokenMeta: Map<
@@ -81,6 +94,7 @@ class LiveOptionChainHub {
     if (!state) {
       state = {
         listeners: new Set(),
+        largeOrderListeners: new Set(),
         chain: null,
         tokenMeta: new Map(),
         last: null,
@@ -101,7 +115,30 @@ class LiveOptionChainHub {
       const s = this.byUnderlying.get(underlying);
       if (!s) return;
       s.listeners.delete(listener);
-      if (s.listeners.size === 0) {
+      if (s.listeners.size === 0 && s.largeOrderListeners.size === 0) {
+        this.teardownUnderlying(underlying);
+      }
+      if (this.totalListeners() === 0) {
+        this.unbindAngel();
+      }
+    };
+  }
+
+  subscribeLargeOrder(
+    underlying: Underlying,
+    listener: LargeOrderListener,
+  ): () => void {
+    const state = this.byUnderlying.get(underlying);
+    if (!state) {
+      // Chain SSE always subscribe()s first; no-op if called alone.
+      return () => undefined;
+    }
+    state.largeOrderListeners.add(listener);
+    return () => {
+      const s = this.byUnderlying.get(underlying);
+      if (!s) return;
+      s.largeOrderListeners.delete(listener);
+      if (s.listeners.size === 0 && s.largeOrderListeners.size === 0) {
         this.teardownUnderlying(underlying);
       }
       if (this.totalListeners() === 0) {
@@ -112,7 +149,9 @@ class LiveOptionChainHub {
 
   private totalListeners(): number {
     let n = 0;
-    for (const s of this.byUnderlying.values()) n += s.listeners.size;
+    for (const s of this.byUnderlying.values()) {
+      n += s.listeners.size + s.largeOrderListeners.size;
+    }
     return n;
   }
 
@@ -124,6 +163,7 @@ class LiveOptionChainHub {
     this.angelBound = true;
     this.releaseAngel = angelWebsocketFeed.acquire();
     this.unsubOption = angelWebsocketFeed.onOptionTick((tick) => {
+      this.detectLargeOrders(tick);
       this.queueOptionTick(tick);
     });
     this.unsubStatus = angelWebsocketFeed.onStatus((s) => {
@@ -141,11 +181,50 @@ class LiveOptionChainHub {
       this.flushTimer = null;
     }
     this.pendingTicks.clear();
+    clearLargeOrderStore();
     angelWebsocketFeed.setOptionSubscriptions([]);
     this.releaseAngel?.();
     this.releaseAngel = null;
     this.angelBound = false;
     this.wsStatus = "idle";
+  }
+
+  /**
+   * Infer large rests on the raw SnapQuote tick (before 100ms coalesce)
+   * so two book updates in one flush window are not merged/missed.
+   */
+  private detectLargeOrders(tick: AngelOptionTick) {
+    if (isDemoMarketDataMode()) return;
+    if (!tick.book || (!tick.book.bids.length && !tick.book.asks.length)) return;
+
+    const events = ingestSnapQuoteBook(tick.token, tick.book, tick.receivedAt);
+    if (!events.length) return;
+
+    for (const [underlying, state] of this.byUnderlying) {
+      if (state.listeners.size === 0 && state.largeOrderListeners.size === 0) {
+        continue;
+      }
+      const meta = state.tokenMeta.get(tick.token);
+      if (!meta) continue;
+      for (const ev of events) {
+        const alert: LargeOrderAlert = {
+          ...ev,
+          underlying,
+          strike: meta.strike,
+          optionType: meta.optionType,
+          tradingsymbol: meta.tradingsymbol,
+          alertText: "",
+        };
+        alert.alertText = formatLargeOrderAlertText(alert);
+        for (const listener of state.largeOrderListeners) {
+          try {
+            listener(alert);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
   }
 
   private queueOptionTick(tick: AngelOptionTick) {
@@ -196,6 +275,11 @@ class LiveOptionChainHub {
         });
       }
       state.tokenMeta = meta;
+      const active = new Set<string>();
+      for (const s of this.byUnderlying.values()) {
+        for (const t of s.tokenMeta.keys()) active.add(t);
+      }
+      pruneLargeOrderTokens(active);
       await this.resyncOptionSubscriptions();
     } catch (err) {
       console.warn(

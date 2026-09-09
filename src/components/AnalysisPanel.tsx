@@ -4,6 +4,7 @@ import { AnalysisLiveChart } from "@/components/AnalysisLiveChart";
 import { SmcSignalCard } from "@/components/analysis/SmcSignalCard";
 import { ChartAiLoader } from "@/components/ChartAiLoader";
 import { IndexDriversHeatmap } from "@/components/IndexDriversHeatmap";
+import { LargeOrderToasts } from "@/components/LargeOrderToasts";
 import { LiquidityStatusBadge } from "@/components/LiquidityStatusBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { SampleStatusBadge } from "@/components/SampleStatusCard";
@@ -362,6 +363,7 @@ export function AnalysisPanel() {
     contracts: chainContracts,
     fetchedAt: chainFetchedAt,
     live: chainLive,
+    largeOrders,
   } = useOptionChainLiveStream(underlying);
 
   // Scalp MTF candles: SSE push with REST poll fallback (delivery only).
@@ -617,6 +619,7 @@ export function AnalysisPanel() {
 
   return (
     <div className="space-y-4 sm:space-y-6">
+      <LargeOrderToasts events={largeOrders} />
       <section className="space-y-2 sm:space-y-3">
         <h1 className="text-xl font-semibold tracking-tight text-binance-gold sm:text-2xl">
           Analysis

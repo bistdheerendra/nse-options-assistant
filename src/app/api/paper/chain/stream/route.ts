@@ -8,6 +8,7 @@ export const maxDuration = 300;
 /**
  * SSE stream of paper option-chain snapshots.
  * ATM-band LTP/OI patched from Angel SmartAPI WebSocket; full chain via REST.
+ * Named event `largeOrder` = inferred book-size jump (not a confirmed order).
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -22,6 +23,7 @@ export async function GET(request: Request) {
 
   const encoder = new TextEncoder();
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeLargeOrder: (() => void) | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
 
@@ -49,6 +51,8 @@ export async function GET(request: Request) {
         }
         unsubscribe?.();
         unsubscribe = null;
+        unsubscribeLargeOrder?.();
+        unsubscribeLargeOrder = null;
         try {
           controller.close();
         } catch {
@@ -59,6 +63,12 @@ export async function GET(request: Request) {
       unsubscribe = liveOptionChainHub.subscribe(underlying, (payload) => {
         send("chain", payload);
       });
+      unsubscribeLargeOrder = liveOptionChainHub.subscribeLargeOrder(
+        underlying,
+        (event) => {
+          send("largeOrder", event);
+        },
+      );
 
       heartbeat = setInterval(() => {
         safeEnqueue(`: heartbeat ${Date.now()}\n\n`);
@@ -74,6 +84,8 @@ export async function GET(request: Request) {
       }
       unsubscribe?.();
       unsubscribe = null;
+      unsubscribeLargeOrder?.();
+      unsubscribeLargeOrder = null;
     },
   });
 

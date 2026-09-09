@@ -1,6 +1,7 @@
 "use client";
 
 import { ChartAiLoader } from "@/components/ChartAiLoader";
+import { LargeOrderStrikeFlag, LargeOrderToasts } from "@/components/LargeOrderToasts";
 import { LiveBadge } from "@/components/LiveBadge";
 import { ModeToggle } from "@/components/ModeToggle";
 import { SpotPriceMarker } from "@/components/SpotPriceMarker";
@@ -172,10 +173,12 @@ function PremiumCell({
   contract,
   selected,
   onSelect,
+  largeOrderFlag,
 }: {
   contract: ChainContract | undefined;
   selected: boolean;
   onSelect: () => void;
+  largeOrderFlag?: ReactNode;
 }) {
   if (!contract) {
     return <span className="text-binance-muted">—</span>;
@@ -215,6 +218,7 @@ function PremiumCell({
           Δ {delta.toFixed(2)}
         </span>
       )}
+      {largeOrderFlag}
     </button>
   );
 }
@@ -506,6 +510,7 @@ export function PaperTradingPanel() {
     loading: chainLoading,
     error: chainError,
     fetchedAt: chainUpdatedAt,
+    largeOrders,
     reconnect: reconnectChain,
   } = useOptionChainLiveStream(underlying);
 
@@ -974,6 +979,7 @@ export function PaperTradingPanel() {
 
   return (
     <div className="space-y-4 sm:space-y-6">
+      <LargeOrderToasts events={largeOrders} />
       <section>
         <h1 className="text-xl font-semibold text-binance-gold sm:text-2xl">
           Paper Trading
@@ -1108,6 +1114,13 @@ export function PaperTradingPanel() {
                         contract={ce}
                         selected={sameContract(selected, ce)}
                         onSelect={() => ce && selectContract(ce)}
+                        largeOrderFlag={
+                          <LargeOrderStrikeFlag
+                            events={largeOrders}
+                            strike={strike}
+                            optionType="CE"
+                          />
+                        }
                       />
                     </td>
                     <td className="px-3 py-2.5 text-right text-binance-muted tabular-nums">
@@ -1124,6 +1137,13 @@ export function PaperTradingPanel() {
                         contract={pe}
                         selected={sameContract(selected, pe)}
                         onSelect={() => pe && selectContract(pe)}
+                        largeOrderFlag={
+                          <LargeOrderStrikeFlag
+                            events={largeOrders}
+                            strike={strike}
+                            optionType="PE"
+                          />
+                        }
                       />
                     </td>
                   </tr>,

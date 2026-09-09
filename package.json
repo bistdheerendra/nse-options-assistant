@@ -23,6 +23,7 @@
     "test:smc-zones": "tsx scripts/test-smc-zones.ts",
     "test:smc-signal": "tsx scripts/test-smc-signal.ts",
     "test:price-slope": "tsx scripts/test-price-slope-gate.ts",
+    "test:large-order": "tsx scripts/test-large-order.ts",
     "test:paper-outcome": "tsx scripts/test-paper-outcome-bridge.ts",
     "test:position-marks": "tsx scripts/test-position-marks.ts",
     "settle:expiry": "tsx scripts/settle-expiry.ts",

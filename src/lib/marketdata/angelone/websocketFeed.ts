@@ -27,12 +27,28 @@ export type AngelIndexTick = {
   receivedAt: number;
 };
 
+export type SnapQuoteLevel = {
+  price: number;
+  qty: number;
+  /** Resting order count at this price (aggregated — not individual order ids). */
+  orders: number;
+};
+
+export type SnapQuoteBook = {
+  bids: SnapQuoteLevel[];
+  asks: SnapQuoteLevel[];
+  totalBuyQty?: number;
+  totalSellQty?: number;
+};
+
 export type AngelOptionTick = {
   token: string;
   ltp: number;
   prevClose: number;
   volume?: number;
   oi?: number;
+  /** SnapQuote best-5 book when the packet is long enough; omitted on Quote/LTP. */
+  book?: SnapQuoteBook;
   exchangeTs: number;
   receivedAt: number;
 };
@@ -68,14 +84,63 @@ type AngelBinaryTick = {
   prevClose: number;
   volume?: number;
   oi?: number;
+  book?: SnapQuoteBook;
   exchangeTs: number;
   receivedAt: number;
 };
 
 /**
+ * SnapQuote best-5 (bytes 147–347) + side totals (75 / 83).
+ * Flag mapping matches Angel Python SDK *after* its buy/sell swap:
+ * flag 1 → bid, flag 0 → ask. Prices are paise / 100.
+ * Each level: flag u16, qty i64, price i64, orders u16 (20 bytes × 10).
+ */
+export function parseSnapQuoteBook(buf: Buffer): SnapQuoteBook | undefined {
+  if (buf.length < 91) return undefined;
+
+  let totalBuyQty: number | undefined;
+  let totalSellQty: number | undefined;
+  const buy = buf.readDoubleLE(75);
+  const sell = buf.readDoubleLE(83);
+  if (Number.isFinite(buy) && buy >= 0) totalBuyQty = buy;
+  if (Number.isFinite(sell) && sell >= 0) totalSellQty = sell;
+
+  const bids: SnapQuoteLevel[] = [];
+  const asks: SnapQuoteLevel[] = [];
+  if (buf.length >= 347) {
+    for (let i = 0; i < 10; i++) {
+      const off = 147 + i * 20;
+      const flag = buf.readUInt16LE(off);
+      const qty = Number(buf.readBigInt64LE(off + 2));
+      const pricePaise = Number(buf.readBigInt64LE(off + 10));
+      const orders = buf.readUInt16LE(off + 18);
+      const price = pricePaise / 100;
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price <= 0) {
+        continue;
+      }
+      const level: SnapQuoteLevel = {
+        price,
+        qty,
+        orders: Number.isFinite(orders) ? orders : 0,
+      };
+      if (flag === 1) bids.push(level);
+      else if (flag === 0) asks.push(level);
+    }
+    bids.sort((a, b) => b.price - a.price);
+    asks.sort((a, b) => a.price - b.price);
+  }
+
+  if (!bids.length && !asks.length && totalBuyQty == null && totalSellQty == null) {
+    return undefined;
+  }
+  return { bids, asks, totalBuyQty, totalSellQty };
+}
+
+/**
  * Angel SmartAPI WS binary packet (little-endian).
  * Prices are paise → divide by 100 for equity/index/options premium.
  * LTP @43; Quote close @115; SnapQuote OI @131 (contract count, not paise).
+ * Best-5 book is additive on SnapQuote (≥347 bytes) — LTP/OI path unchanged.
  */
 export function parseAngelBinaryPacket(buf: Buffer): AngelBinaryTick | null {
   if (buf.length < 51) return null;
@@ -111,6 +176,8 @@ export function parseAngelBinaryPacket(buf: Buffer): AngelBinaryTick | null {
     if (Number.isFinite(rawOi) && rawOi >= 0) oi = rawOi;
   }
 
+  const book = mode === MODE_SNAP_QUOTE ? parseSnapQuoteBook(buf) : undefined;
+
   return {
     mode,
     exchangeType,
@@ -119,6 +186,7 @@ export function parseAngelBinaryPacket(buf: Buffer): AngelBinaryTick | null {
     prevClose,
     volume,
     oi,
+    book,
     exchangeTs,
     receivedAt: Date.now(),
   };
@@ -343,6 +411,7 @@ class AngelWebsocketFeed {
           prevClose: raw.prevClose,
           volume: raw.volume,
           oi: raw.oi,
+          book: raw.book,
           exchangeTs: raw.exchangeTs,
           receivedAt: raw.receivedAt,
         };

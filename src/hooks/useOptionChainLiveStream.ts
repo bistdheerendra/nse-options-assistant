@@ -1,7 +1,13 @@
 "use client";
 
-import type { LiveOptionChainPayload } from "@/lib/marketdata/liveOptionChainHub";
+import type {
+  LargeOrderAlert,
+  LiveOptionChainPayload,
+} from "@/lib/marketdata/liveOptionChainHub";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+const LARGE_ORDER_TOAST_CAP = 3;
+const LARGE_ORDER_TOAST_MS = 6000;
 
 export type OptionChainLiveContract = {
   strike: number;
@@ -41,7 +47,9 @@ export function useOptionChainLiveStream(underlying: string) {
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [largeOrders, setLargeOrders] = useState<LargeOrderAlert[]>([]);
   const hasDataRef = useRef(false);
+  const toastTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
     hasDataRef.current = contracts.length > 0;
@@ -62,6 +70,7 @@ export function useOptionChainLiveStream(underlying: string) {
     setFeed(undefined);
     setSubscribedTokens(0);
     setGreeksStatus(undefined);
+    setLargeOrders([]);
     hasDataRef.current = false;
 
     const es = new EventSource(
@@ -97,6 +106,25 @@ export function useOptionChainLiveStream(underlying: string) {
 
     es.addEventListener("chain", onChain as EventListener);
 
+    const onLargeOrder = (ev: MessageEvent<string>) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse(ev.data) as LargeOrderAlert;
+        if (!payload?.inferred || !payload.alertText) return;
+        setLargeOrders((prev) => {
+          const next = [payload, ...prev];
+          return next.slice(0, LARGE_ORDER_TOAST_CAP);
+        });
+        const timer = window.setTimeout(() => {
+          setLargeOrders((prev) => prev.filter((x) => x !== payload));
+        }, LARGE_ORDER_TOAST_MS);
+        toastTimersRef.current.push(timer);
+      } catch {
+        // ignore malformed frames
+      }
+    };
+    es.addEventListener("largeOrder", onLargeOrder as EventListener);
+
     es.onopen = () => {
       if (!cancelled) setLive(true);
     };
@@ -124,7 +152,10 @@ export function useOptionChainLiveStream(underlying: string) {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVis);
       es.removeEventListener("chain", onChain as EventListener);
+      es.removeEventListener("largeOrder", onLargeOrder as EventListener);
       es.close();
+      for (const t of toastTimersRef.current) window.clearTimeout(t);
+      toastTimersRef.current = [];
     };
   }, [underlying, reconnectKey, reconnect]);
 
@@ -141,6 +172,7 @@ export function useOptionChainLiveStream(underlying: string) {
     loading,
     error,
     fetchedAt,
+    largeOrders,
     reconnect,
   };
 }
