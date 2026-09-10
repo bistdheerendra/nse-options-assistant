@@ -15,7 +15,9 @@ import {
   clearLargeOrderStore,
   formatLargeOrderAlertText,
   ingestSnapQuoteBook,
+  isLargeOrderDetectorEnabled,
   pruneLargeOrderTokens,
+  takeUnderlyingRateLimited,
   type LargeOrderEvent,
 } from "@/lib/marketdata/largeOrder";
 
@@ -194,6 +196,7 @@ class LiveOptionChainHub {
    * so two book updates in one flush window are not merged/missed.
    */
   private detectLargeOrders(tick: AngelOptionTick) {
+    if (!isLargeOrderDetectorEnabled()) return;
     if (isDemoMarketDataMode()) return;
     if (!tick.book || (!tick.book.bids.length && !tick.book.asks.length)) return;
 
@@ -206,7 +209,7 @@ class LiveOptionChainHub {
       }
       const meta = state.tokenMeta.get(tick.token);
       if (!meta) continue;
-      for (const ev of events) {
+      const alerts: LargeOrderAlert[] = events.map((ev) => {
         const alert: LargeOrderAlert = {
           ...ev,
           underlying,
@@ -216,6 +219,14 @@ class LiveOptionChainHub {
           alertText: "",
         };
         alert.alertText = formatLargeOrderAlertText(alert);
+        return alert;
+      });
+      const limited = takeUnderlyingRateLimited(
+        underlying,
+        alerts,
+        tick.receivedAt,
+      );
+      for (const alert of limited) {
         for (const listener of state.largeOrderListeners) {
           try {
             listener(alert);
@@ -415,17 +426,26 @@ class LiveOptionChainHub {
         const meta = state.tokenMeta.get(tick.token);
         if (!meta) continue;
 
-        const contracts = state.chain.contracts.map((c) => {
+        let displayChanged = false;
+        const prevContracts = state.chain.contracts;
+        const contracts = prevContracts.map((c) => {
           const match =
             (c.strike === meta.strike && c.optionType === meta.optionType) ||
             c.symboltoken === tick.token ||
             c.tradingsymbol === meta.tradingsymbol;
           if (!match) return c;
-          return applyTickToContract(c, tick);
+          const next = applyTickToContract(c, tick);
+          if (tickChangesDisplay(c, next)) displayChanged = true;
+          return next;
         });
-        state.chain = { ...state.chain, contracts };
-        state.feed = "angel-ws";
-        touched.add(underlying);
+        const patched = contracts.some((c, i) => c !== prevContracts[i]);
+        if (patched) {
+          state.chain = { ...state.chain, contracts };
+        }
+        if (displayChanged) {
+          state.feed = "angel-ws";
+          touched.add(underlying);
+        }
       }
     }
     const fetchedAt = new Date().toISOString();
@@ -471,17 +491,44 @@ function applyTickToContract(
   const change = tick.ltp - tick.prevClose;
   const changePct =
     tick.prevClose !== 0 ? (change / tick.prevClose) * 100 : undefined;
+  const nextChange = Number.isFinite(change) ? change : c.change;
+  const nextChangePct =
+    changePct !== undefined && Number.isFinite(changePct)
+      ? changePct
+      : c.changePct;
+  const nextVolume = tick.volume ?? c.volume;
+  const nextOi = tick.oi ?? c.oi;
+  if (
+    c.ltp === tick.ltp &&
+    c.volume === nextVolume &&
+    c.oi === nextOi &&
+    c.change === nextChange &&
+    c.changePct === nextChangePct
+  ) {
+    return c;
+  }
   return {
     ...c,
     ltp: tick.ltp,
-    change: Number.isFinite(change) ? change : c.change,
-    changePct:
-      changePct !== undefined && Number.isFinite(changePct)
-        ? changePct
-        : c.changePct,
-    volume: tick.volume ?? c.volume,
-    oi: tick.oi ?? c.oi,
+    change: nextChange,
+    changePct: nextChangePct,
+    volume: nextVolume,
+    oi: nextOi,
   };
+}
+
+/** Chain table shows LTP / OI / % — not best-5 qty. Volume-only ticks stay in memory. */
+function tickChangesDisplay(
+  prev: OptionContractQuote,
+  next: OptionContractQuote,
+): boolean {
+  if (prev === next) return false;
+  return (
+    prev.ltp.toFixed(2) !== next.ltp.toFixed(2) ||
+    prev.oi !== next.oi ||
+    prev.change !== next.change ||
+    prev.changePct !== next.changePct
+  );
 }
 
 const globalForHub = globalThis as typeof globalThis & {

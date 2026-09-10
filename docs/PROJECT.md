@@ -566,27 +566,33 @@ Heuristic regular cash-session labels + open/closed check on the Asia/Kolkata wa
 - Dashboard macro strip (`/api/dashboard/macro`): Gift Nifty proxy, India VIX (NSE/Yahoo), US (Dow/Nasdaq/S&P), Asian indices, WTI/Brent crude, DXY, USDINR; this-week economic highlights (Fed/CPI/GDP/NFP/RBI when present); today’s news via Google/Yahoo RSS. Free unofficial APIs — no paid keys. News/events show heuristic **BULL / BEAR / MIXED** bias pills (keyword + print-vs-forecast; labeled experimental). Macro quotes auto-refresh ~15s (LIVE badge; pauses when tab hidden). Macro tiles reuse the same session-hours labels / open-state styling as index cards.
 - Stage 6 track-record UI polish: `BacktestPanel` error state + retry; `ChartAiLoader` dedicated loading variant for track-record charts.
 - Paper option chain: live NSE India OC for NIFTY/BANKNIFTY (Call/Put LTP + OI + % change) + SENSEX via Angel; **Angel SmartAPI WebSocket SnapQuote** for ATM ±10 CE/PE (`setOptionSubscriptions` on shared `websocketFeed`, `liveOptionChainHub`, SSE `/api/paper/chain/stream`); REST snapshot ~20s when WS live / ~2s fallback; spot marker from dashboard index SSE; Groww-style ATM divider.
-- Large-order **inference** from SnapQuote best-5 (`largeOrder.ts`): Δqty vs rolling mean at a price; ATM ±10 only; SSE `largeOrder` on existing chain stream; inferred-not-confirmed labeling; `LARGE_ORDER_ABS_MIN` uncalibrated pending live percentiles; `npm run test:large-order`
+- Large-order **inference** from SnapQuote best-5 (`largeOrder.ts`): Δqty vs rolling mean at a price; **new/re-entered book prices seed only (do not fire)**; ATM ±10 only; SSE `largeOrder` on existing chain stream; inferred-not-confirmed labeling; live-tuned `LARGE_ORDER_ABS_MIN=5000` (p95 of NIFTY ATM±10 existing +Δqty, 2026-09-10) + `LARGE_ORDER_MULT=5`; per-price cooldown 30s + per-underlying 12s rate limit; `LARGE_ORDER_DETECTOR_ENABLED=false` escape hatch (parser stays on); `npm run test:large-order`
 
 #### Large-order inference (SnapQuote best-5, ATM ±10 only)
 
 **Not a tape of individual orders.** Angel SmartAPI does not publish order ids. SnapQuote (WS mode 3 — already subscribed for ATM ±10) carries aggregated **best 5 bid/ask** (`price`, `quantity`, `no of orders`) plus `total_buy_quantity` / `total_sell_quantity`. Mode 4 20-depth is F&O-unsupported and deprecated (Apr 2025); we do **not** subscribe it.
 
-Parser (`parseSnapQuoteBook` in `websocketFeed.ts`) unpacks those fields additively; LTP/OI offsets are unchanged. Detection (`src/lib/marketdata/largeOrder.ts`) runs on each **parsed tick before** the hub’s 100ms coalesce. First snapshot per token is `warming_up` (no event). After that:
+Parser (`parseSnapQuoteBook` in `websocketFeed.ts`) unpacks those fields additively; LTP/OI offsets are unchanged. Detection (`src/lib/marketdata/largeOrder.ts`) runs on each **parsed tick before** the hub’s 100ms coalesce. Chain **display** still rides that coalesce, and the hub **does not SSE-broadcast** when only best-5 qty / volume changed (table is keyed to LTP / OI / % change). First snapshot per token is `warming_up` (no event). After that:
 
 ```
 Δqty = qtyNow − qtyPrev   at the same book price (keyed by price, not slot)
-fire if Δqty > 0 AND Δqty ≥ LARGE_ORDER_ABS_MIN AND Δqty ≥ LARGE_ORDER_MULT × rollingMean
+fire if qtyPrev > 0 AND rollingMean > 0
+      AND Δqty > 0 AND Δqty ≥ LARGE_ORDER_ABS_MIN AND Δqty ≥ LARGE_ORDER_MULT × rollingMean
       AND cooldown (LARGE_ORDER_COOLDOWN_SEC per token+side+price) has elapsed
+then hub emits at most 1 event per underlying per LARGE_ORDER_UNDERLYING_COOLDOWN_SEC
 ```
 
-| Constant | Starting value | Notes |
-|----------|----------------:|-------|
-| `LARGE_ORDER_MULT` | 3 | Relative spike vs short rolling mean (window 8). **Provisional.** |
-| `LARGE_ORDER_ABS_MIN` | 250 | Floor in Angel-reported depth qty (typically F&O lots). **Uncalibrated — needs live market-hours Δqty percentiles** (same follow-up pattern as the SWING price-slope 0.35% threshold). Do not reuse OI-velocity’s 2000/min. |
-| `LARGE_ORDER_COOLDOWN_SEC` | 10 | Iceberg / resting stack anti-spam |
+Rolling mean uses **prior** qty samples only (the triggering spike is not in its own baseline). A price that newly appears in the best-5 is seeded and never fired on that first sight — live 30s NIFTY ATM±10 showed ~1612/1912 naive fires were this new-price path (`relativeGate=0`).
 
-UI (Paper + Analysis, same `/api/paper/chain/stream`): named SSE event `largeOrder`. Headline example: *“Large bid qty appeared at 24500 CE (~3.2× recent size, 1 order)”* plus *“Inferred from a book size jump — not a confirmed individual order or trade.”* Order-count Δ is a **modifier** (≈1 extra order → more consistent with one large rest; many new orders → smaller stack). Toasts cap at 3, auto-dismiss ~6s. **Scope hard limit:** only ATM ±10 tokens already on SnapQuote — not full-chain. Demo / missing book → no events (never fabricated).
+| Constant | Value | Notes |
+|----------|----------------:|-------|
+| `LARGE_ORDER_MULT` | 5 | Relative spike vs short rolling mean (window 8). Live: 3× of prev is common ATM noise. |
+| `LARGE_ORDER_ABS_MIN` | 5000 | p95 of existing +Δqty on NIFTY ATM±10 SnapQuote (2026-09-10, 30–45s windows: p95≈4485–4745). Shipped-250 matched ~75% of ordinary +Δqty. |
+| `LARGE_ORDER_COOLDOWN_SEC` | 30 | Per token+side+price iceberg / resting stack anti-spam |
+| `LARGE_ORDER_UNDERLYING_COOLDOWN_SEC` | 12 | SSE/toast cap across the ATM band (L1 prices rotate, so per-price keys are not enough) |
+| `LARGE_ORDER_DETECTOR_ENABLED` | default on | Set `false` to stop inference/SSE; SnapQuote best-5 parse stays |
+
+UI (Paper + Analysis, same `/api/paper/chain/stream`): named SSE event `largeOrder`. Headline example: *“Large bid qty appeared at 24500 CE (~3.2× recent size, 1 order)”* plus *“Inferred from a book size jump — not a confirmed individual order or trade.”* Order-count Δ is a **modifier** (≈1 extra order → more consistent with one large rest; many new orders → smaller stack). Toasts cap at **2**, auto-dismiss ~6s; older events drop. Inline strike-row flags removed (they changed cell height every alert). **Scope hard limit:** only ATM ±10 tokens already on SnapQuote — not full-chain. Demo / missing book → no events (never fabricated).
 
 - **Angel Option Greeks (Delta):** `src/lib/marketdata/optionGreeks.ts` → POST `/optionGreek` (TTL ~18s); merged by strike+optionType onto chain rows after NSE/Angel LTP/OI assembly (does not replace those sources). Paper chain shows compact **Δ** under CE/PE LTP (“Angel Greeks (approx.)”); off-hours/AB9019 → single “Greeks unavailable…” note, no per-row clutter. Mark as taken / scalp auto-paper use real delta for premium SL/TP when present; else 0.6/1.8 multiplier + **est. — no delta**.
 - Analysis index drivers heatmap (`IndexDriversHeatmap` / `/api/analysis/heatmap`) — top-weight Nifty / Bank Nifty / Sensex names; **est. contribution pts** = `weight% × day% × indexLevel / 10000` (approx weights, not live NSE free-float); cell color = day %; sorted by |points|
@@ -596,7 +602,6 @@ UI (Paper + Analysis, same `/api/paper/chain/stream`): named SSE event `largeOrd
 - Live Gift Nifty via SmartAPI (instrument absent from scrip master; dashboard uses free giftcitynifty.com NSE IX feed, with Nifty proxy fallback)
 - Exchange holiday calendar for session open/closed (current `marketHours` is weekday + regular hours only)
 - TimescaleDB hypertables for long-horizon IV / candle history (scalp candles use Postgres `MarketCandle` for now; IV trend still live + candle-derived proxy)
-- Live-data retune of `LARGE_ORDER_ABS_MIN` / `LARGE_ORDER_MULT` from market-hours SnapQuote Δqty percentiles (same method as SWING price-slope 0.35%)
 - Multi-instance Redis fan-out for scalp candle SSE / Angel option/index ticks (single-process in-memory hubs today — `scalpCandleHub`, `liveQuoteHub`, `liveOptionChainHub`); full-chain (non-ATM) WebSocket subscribe
 - Real broker order placement (intentionally out of scope)
 

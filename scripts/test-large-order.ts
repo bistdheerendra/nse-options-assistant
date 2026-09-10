@@ -9,9 +9,12 @@ import {
 import {
   LARGE_ORDER_ABS_MIN,
   LARGE_ORDER_MULT,
+  LARGE_ORDER_UNDERLYING_COOLDOWN_SEC,
   clearLargeOrderStore,
   formatLargeOrderAlertText,
   ingestSnapQuoteBook,
+  takeUnderlyingRateLimited,
+  type LargeOrderEvent,
 } from "../src/lib/marketdata/largeOrder";
 
 function assert(cond: boolean, msg: string) {
@@ -134,7 +137,13 @@ assert(
 assert(fired[0]!.disclaimer.toLowerCase().includes("not a confirmed"), "disclaimer");
 
 const cooled = ingestSnapQuoteBook("t1", {
-  bids: [{ price: 12.5, qty: 900, orders: 3 }],
+  bids: [
+    {
+      price: 12.5,
+      qty: 100 + LARGE_ORDER_ABS_MIN + 50 + LARGE_ORDER_ABS_MIN,
+      orders: 3,
+    },
+  ],
   asks: baseline.asks,
 });
 assert(cooled.length === 0, "cooldown must suppress");
@@ -146,6 +155,57 @@ const tooSmall = ingestSnapQuoteBook("t2", {
   asks: baseline.asks,
 });
 assert(tooSmall.length === 0, "Δ below ABS_MIN must not fire");
+
+clearLargeOrderStore();
+ingestSnapQuoteBook("t3", baseline);
+const newPrice = ingestSnapQuoteBook("t3", {
+  bids: [
+    ...baseline.bids,
+    { price: 13.5, qty: 200, orders: 1 },
+  ],
+  asks: baseline.asks,
+});
+assert(newPrice.length === 0, "new book price must seed, not fire");
+const jumpedNew = ingestSnapQuoteBook("t3", {
+  bids: [
+    ...baseline.bids,
+    { price: 13.5, qty: 200 + LARGE_ORDER_ABS_MIN, orders: 1 },
+  ],
+  asks: baseline.asks,
+});
+assert(jumpedNew.length === 1, `seeded price jump should fire, got ${jumpedNew.length}`);
+assert(jumpedNew[0]!.qtyPrev === 200, "prev is seed qty");
+assert(jumpedNew[0]!.rollingMean === 200, "mean excludes spike");
+
+const stub = [{ deltaQty: 9000 } as LargeOrderEvent];
+clearLargeOrderStore();
+assert(takeUnderlyingRateLimited("NIFTY", stub, 1_000).length === 1, "first emit");
+assert(
+  takeUnderlyingRateLimited("NIFTY", stub, 2_000).length === 0,
+  "underlying cooldown",
+);
+assert(
+  takeUnderlyingRateLimited(
+    "NIFTY",
+    stub,
+    1_000 + LARGE_ORDER_UNDERLYING_COOLDOWN_SEC * 1000,
+  ).length === 1,
+  "underlying cooldown elapsed",
+);
+assert(
+  takeUnderlyingRateLimited("BANKNIFTY", stub, 2_000).length === 1,
+  "other underlying independent",
+);
+
+const prevFlag = process.env.LARGE_ORDER_DETECTOR_ENABLED;
+process.env.LARGE_ORDER_DETECTOR_ENABLED = "false";
+clearLargeOrderStore();
+assert(
+  ingestSnapQuoteBook("t-off", spiked).length === 0,
+  "feature flag disables detector",
+);
+if (prevFlag === undefined) delete process.env.LARGE_ORDER_DETECTOR_ENABLED;
+else process.env.LARGE_ORDER_DETECTOR_ENABLED = prevFlag;
 
 const headline = formatLargeOrderAlertText({
   side: "bid",

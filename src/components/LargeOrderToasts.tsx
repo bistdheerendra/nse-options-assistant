@@ -33,27 +33,3 @@ export function LargeOrderToasts({ events }: { events: LargeOrderAlert[] }) {
     </div>
   );
 }
-
-/** Tiny inline flag on a chain CE/PE cell. */
-export function LargeOrderStrikeFlag({
-  events,
-  strike,
-  optionType,
-}: {
-  events: LargeOrderAlert[];
-  strike: number;
-  optionType: "CE" | "PE";
-}) {
-  const hit = events.find(
-    (e) => e.strike === strike && e.optionType === optionType,
-  );
-  if (!hit) return null;
-  return (
-    <span
-      className="mt-0.5 block text-[10px] font-medium text-binance-gold"
-      title={hit.disclaimer}
-    >
-      {hit.side === "bid" ? "Inferred large bid qty" : "Inferred large ask qty"}
-    </span>
-  );
-}

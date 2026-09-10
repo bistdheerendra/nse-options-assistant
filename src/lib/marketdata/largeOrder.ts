@@ -23,20 +23,28 @@ export type BookSnapshot = {
 
 /**
  * Relative spike vs rolling mean of qty at the same price.
- * Starting guess — retune from live Δqty percentiles (same follow-up pattern
- * as the price-slope SWING threshold).
+ * Live NIFTY ATM±10 (2026-09-10, market hours): ordinary existing +Δqty often
+ * already exceeds 3× prev; 5× is closer to the rare tail.
  */
-export const LARGE_ORDER_MULT = 3;
+export const LARGE_ORDER_MULT = 5;
 
 /**
- * Absolute floor in Angel-reported depth quantity (F&O SnapQuote qty is
- * typically lots/contracts, not OI-velocity units). Uncalibrated — do NOT
- * reuse OI_VELOCITY_NOTABLE_PER_MIN (2000/min); needs a market-hours histogram.
+ * Absolute floor in Angel-reported depth quantity (F&O SnapQuote lots).
+ * Live NIFTY ATM±10 30–45s windows (2026-09-10): existing +Δqty p50≈650–715,
+ * p95≈4485–4745, p99≈7670–8580. Floor = p95 band rounded to 5000 (same
+ * percentile method as the SWING price-slope threshold). 250 shipped as a
+ * placeholder and matched ~75% of ordinary +Δqty.
  */
-export const LARGE_ORDER_ABS_MIN = 250;
+export const LARGE_ORDER_ABS_MIN = 5000;
 
 /** Per token+side+price — resting icebergs would otherwise spam. */
-export const LARGE_ORDER_COOLDOWN_SEC = 10;
+export const LARGE_ORDER_COOLDOWN_SEC = 30;
+
+/**
+ * Cap toast/SSE rate across the whole ATM band. Token+price cooldown does not
+ * help when L1 prices rotate and each new key looks like a fresh event.
+ */
+export const LARGE_ORDER_UNDERLYING_COOLDOWN_SEC = 12;
 
 /** Prior qty samples kept per price for the rolling mean. */
 export const LARGE_ORDER_ROLLING_WINDOW = 8;
@@ -94,6 +102,12 @@ const DISCLAIMER =
 
 /** In-process prior books (single-instance, like oiVelocity). */
 const byToken = new Map<string, TokenBookState>();
+const lastUnderlyingFireAt = new Map<string, number>();
+
+/** Escape hatch — SnapQuote parsing stays on; only inference/SSE emit stops. */
+export function isLargeOrderDetectorEnabled(): boolean {
+  return process.env.LARGE_ORDER_DETECTOR_ENABLED !== "false";
+}
 
 function priceKey(side: BookSide, price: number): string {
   return `${side}:${price.toFixed(2)}`;
@@ -160,6 +174,7 @@ function considerLevel(
   const prev = state.levels.get(key);
   const qtyPrev = prev?.qty ?? 0;
   const ordersPrev = prev?.orders ?? 0;
+  // Baseline is prior samples only — the current spike is not in rollingMean.
   const rollingMean = mean(prev?.recent ?? []);
   // Δqty = qtyNow − qtyPrev at this price (0 if the price was absent last tick)
   const deltaQty = level.qty - qtyPrev;
@@ -168,7 +183,11 @@ function considerLevel(
     (state.lastFiredAt.get(key) ?? 0) + LARGE_ORDER_COOLDOWN_SEC * 1000;
 
   const relativeGate = rollingMean > 0 ? LARGE_ORDER_MULT * rollingMean : 0;
+  // New / re-entered top-5 prices have qtyPrev=0 and relativeGate=0. Live
+  // sample: that path was ~84% of fires (1612/1912 in 30s) — seed, don't fire.
   const fires =
+    qtyPrev > 0 &&
+    rollingMean > 0 &&
     deltaQty > 0 &&
     deltaQty >= LARGE_ORDER_ABS_MIN &&
     deltaQty >= relativeGate &&
@@ -236,6 +255,7 @@ export function ingestSnapQuoteBook(
   book: BookSnapshot | undefined | null,
   now = Date.now(),
 ): LargeOrderEvent[] {
+  if (!isLargeOrderDetectorEnabled()) return [];
   if (!token || !book) return [];
   const hasLevels = book.bids.length > 0 || book.asks.length > 0;
   if (!hasLevels) return [];
@@ -290,6 +310,26 @@ export function pruneLargeOrderTokens(activeTokens: Set<string>) {
   }
 }
 
+/**
+ * At most one SSE/toast per underlying per window. Detector may still produce
+ * 1–2 candidates per tick; the hub calls this before emit.
+ */
+export function takeUnderlyingRateLimited<T extends LargeOrderEvent>(
+  underlying: string,
+  events: T[],
+  now = Date.now(),
+): T[] {
+  if (!events.length) return [];
+  const last = lastUnderlyingFireAt.get(underlying) ?? 0;
+  // last=0 means never fired (do not treat epoch-0 as "fired 12s ago").
+  if (last > 0 && now - last < LARGE_ORDER_UNDERLYING_COOLDOWN_SEC * 1000) {
+    return [];
+  }
+  lastUnderlyingFireAt.set(underlying, now);
+  return events.slice(0, 1);
+}
+
 export function clearLargeOrderStore() {
   byToken.clear();
+  lastUnderlyingFireAt.clear();
 }

@@ -6,8 +6,16 @@ import type {
 } from "@/lib/marketdata/liveOptionChainHub";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const LARGE_ORDER_TOAST_CAP = 3;
+const LARGE_ORDER_TOAST_CAP = 2;
 const LARGE_ORDER_TOAST_MS = 6000;
+
+function chainDisplayFingerprint(contracts: OptionChainLiveContract[]): string {
+  let s = "";
+  for (const c of contracts) {
+    s += `${c.strike}${c.optionType}:${c.ltp.toFixed(2)}:${c.oi ?? ""}:${c.changePct ?? ""}|`;
+  }
+  return s;
+}
 
 export type OptionChainLiveContract = {
   strike: number;
@@ -50,6 +58,7 @@ export function useOptionChainLiveStream(underlying: string) {
   const [largeOrders, setLargeOrders] = useState<LargeOrderAlert[]>([]);
   const hasDataRef = useRef(false);
   const toastTimersRef = useRef<number[]>([]);
+  const chainFpRef = useRef("");
 
   useEffect(() => {
     hasDataRef.current = contracts.length > 0;
@@ -72,6 +81,7 @@ export function useOptionChainLiveStream(underlying: string) {
     setGreeksStatus(undefined);
     setLargeOrders([]);
     hasDataRef.current = false;
+    chainFpRef.current = "";
 
     const es = new EventSource(
       `/api/paper/chain/stream?underlying=${encodeURIComponent(underlying)}`,
@@ -81,8 +91,16 @@ export function useOptionChainLiveStream(underlying: string) {
       if (cancelled) return;
       try {
         const payload = JSON.parse(ev.data) as LiveOptionChainPayload;
-        setFetchedAt(payload.fetchedAt);
         if (payload.ok) {
+          const fp = `${payload.spot}|${payload.expiry}|${chainDisplayFingerprint(payload.contracts)}`;
+          if (fp === chainFpRef.current) {
+            setLive(true);
+            setError(null);
+            setLoading(false);
+            return;
+          }
+          chainFpRef.current = fp;
+          setFetchedAt(payload.fetchedAt);
           setContracts(payload.contracts);
           setExpiry(payload.expiry);
           setSpot(payload.spot);
@@ -95,6 +113,7 @@ export function useOptionChainLiveStream(underlying: string) {
           setError(null);
           setLoading(false);
         } else {
+          setFetchedAt(payload.fetchedAt);
           setLive(false);
           setError(payload.uiHint ?? payload.error);
           setLoading(false);
